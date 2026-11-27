@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ptkorea_factbook_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: factbook
+      MYSQL_USER: factbook
+      MYSQL_PASSWORD: factbook_pw
+      TZ: Asia/Seoul
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+09:00
+      - --max_allowed_packet=67108864
+    volumes:
+      - factbook_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ufactbook", "-pfactbook_pw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  factbook_mysql_data:
