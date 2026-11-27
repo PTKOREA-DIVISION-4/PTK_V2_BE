@@ -198,6 +198,85 @@ class ApifyClient(BaseApiClient):
         )
         return items
 
+    async def collect_korean_news_press(
+        self,
+        *,
+        brand_names: list[str],
+        product_name: str,
+        max_results_per_query: int = 8,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Collects recent Korean news/PR articles per brand via Apify Google Search scraper."""
+        self._ensure_token()
+        clean_brands = [b.strip() for b in brand_names if b and b.strip()][:4]
+        if not clean_brands:
+            return []
+
+        news_sites = (
+            "(site:n.news.naver.com OR site:news.naver.com OR site:mk.co.kr OR site:hankyung.com "
+            "OR site:edaily.co.kr OR site:yna.co.kr OR site:chosun.com OR site:joongang.co.kr)"
+        )
+        queries = [f"{news_sites} {b} {product_name}".strip() for b in clean_brands]
+        items = await self.run_actor_sync_items(
+            actor_id="apify/google-search-scraper",
+            run_input={
+                "queries": "\n".join(queries),
+                "maxPagesPerQuery": 1,
+                "resultsPerPage": max_results_per_query,
+                "countryCode": "kr",
+                "languageCode": "ko",
+            },
+            force_refresh=force_refresh,
+        )
+        normalized: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for page in items:
+            search_q = str((page.get("searchQuery") or {}).get("term") or "")
+            matched_brand = next((b for b in clean_brands if b in search_q), clean_brands[0])
+            organic = page.get("organicResults") or []
+            for res in organic:
+                if not isinstance(res, dict):
+                    continue
+                url = str(res.get("url") or "").strip()
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                title = str(res.get("title") or "언론 보도 기사").strip()
+                desc = str(res.get("description") or res.get("snippet") or "").strip()
+                # Re-match brand from title/desc if multi-brand overlap
+                for b in clean_brands:
+                    if b in title or b in desc:
+                        matched_brand = b
+                        break
+                normalized.append(
+                    {
+                        "channel": "news_press",
+                        "brand_name": matched_brand,
+                        "topic_tag": self._classify_press_topic(f"{title} {desc}"),
+                        "title": title,
+                        "content": desc or title,
+                        "source_url": url,
+                        "published_at": res.get("date"),
+                    }
+                )
+        return normalized
+
+    @staticmethod
+    def _classify_press_topic(text: str) -> str:
+        t = text.lower()
+        if any(k in t for k in ("출시", "신제품", "컬렉션", "에디션", "런칭", "론칭")):
+            return "신제품 출시"
+        if any(k in t for k in ("협업", "콜라보", "엠버서더", "모델", "앰배서더")):
+            return "협업·콜라보"
+        if any(k in t for k in ("팝업", "체험", "전시", "플래그십", "스토어", "오픈")):
+            return "팝업·체험"
+        if any(k in t for k in ("매출", "영업이익", "실적", "성장", "목표", "공시")):
+            return "실적·경영"
+        if any(k in t for k in ("할인", "프로모션", "라이브", "홈쇼핑", "세트", "기획전")):
+            return "프로모션·유통"
+        return "일반 보도"
+
     @staticmethod
     def _detect_channel_from_url(url: str) -> str:
         lower = url.lower()

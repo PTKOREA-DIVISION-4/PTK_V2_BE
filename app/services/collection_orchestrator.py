@@ -30,11 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 ALL_COLLECTION_SUBTASKS: list[tuple[str, str]] = [
-    ("perplexity_research", "거시 시장·규제·자사/경쟁 기초 리서치 (Perplexity)"),
+    ("perplexity_research", "거시 시장·규제·자사/경쟁 1:1·벤치마크 리서치 (Perplexity)"),
     ("naver_datalab", "네이버 데이터랩 검색어 트렌드·쇼핑 인사이트 정량 수집"),
     ("sns_official_top5", "자사·경쟁사 공식 SNS 채널 지표 및 기간 내 TOP 5 추출"),
     ("creator_collab", "크리에이터 협업 콘텐츠 및 시딩 레퍼런스 수집"),
     ("community_voc", "국내 커뮤니티·블로그·카페·리뷰 실소비자 VOC 수집"),
+    ("news_press", "자사·경쟁사 언론 보도 기사 및 월별·주제별 PR 동향 수집"),
     ("media_archiving", "참조 이미지·영상 주요 장면 스크린샷 로컬 아카이빙"),
 ]
 
@@ -184,6 +185,8 @@ class CollectionOrchestrator:
             tasks.append(self._run_creator_collab(ctx, project, force_refresh))
         if "community_voc" in key_set:
             tasks.append(self._run_community_voc(ctx, project, force_refresh))
+        if "news_press" in key_set:
+            tasks.append(self._run_news_press(ctx, project, force_refresh))
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -379,6 +382,76 @@ class CollectionOrchestrator:
                 log_message=f"실패: {exc}",
             )
 
+    async def _run_news_press(
+        self, ctx: JobContext, project: Project, force_refresh: bool
+    ) -> None:
+        key = "news_press"
+        await ctx.update_subtask(key, status="RUNNING", progress_pct=20, log_message="자사·경쟁사 언론 보도 수집 중")
+        client = ApifyClient()
+        try:
+            brand_names = [project.brand_name] + [c.brand_name for c in project.competitors[:3]]
+            rows = await client.collect_korean_news_press(
+                brand_names=brand_names,
+                product_name=project.product_name,
+                force_refresh=force_refresh,
+            )
+            entities: list[RawSourceItem] = []
+            for r in rows:
+                b_name = str(r.get("brand_name") or project.brand_name)
+                sec = SectionCode.OWN.value if b_name == project.brand_name else SectionCode.COMPETITOR.value
+                content = str(r.get("content") or r.get("title") or "")
+                quote = extract_best_evidence_quote(content, [b_name, project.product_name])
+                spans, verified = compute_highlight_spans(content, quote)
+                entities.append(
+                    RawSourceItem(
+                        project_id=project.id,
+                        section_code=sec,
+                        provider="APIFY",
+                        channel="news_press",
+                        title=str(r.get("title") or "언론 보도 기사")[:480],
+                        content=content,
+                        source_url=r.get("source_url"),
+                        published_at=utcnow_naive(),
+                        evidence_quote=quote,
+                        highlight_spans=spans,
+                        sentiment="NEUTRAL",
+                        review_status="PENDING",
+                        metadata_json={
+                            "brand_name": b_name,
+                            "topic_tag": r.get("topic_tag") or "일반 보도",
+                            "published_date_raw": r.get("published_at"),
+                            "is_quote_verified": verified,
+                        },
+                    )
+                )
+
+            async with self._db_write_lock:
+                async with self.session_factory() as session:
+                    await session.execute(
+                        delete(RawSourceItem).where(
+                            RawSourceItem.project_id == project.id,
+                            RawSourceItem.channel == "news_press",
+                        )
+                    )
+                    session.add_all(entities)
+                    await session.commit()
+
+            await ctx.update_subtask(
+                key,
+                status="COMPLETED",
+                progress_pct=100,
+                collected_count=len(entities),
+                log_message=f"언론 보도 기사 {len(entities)}건 저장 완료",
+            )
+        except Exception as exc:
+            await ctx.update_subtask(
+                key,
+                status="FAILED",
+                progress_pct=100,
+                error_message=str(exc),
+                log_message=f"실패: {exc}",
+            )
+
     async def _run_sns_official_top5(
         self, ctx: JobContext, project: Project, force_refresh: bool
     ) -> None:
@@ -547,6 +620,76 @@ class CollectionOrchestrator:
                 log_message=f"실패: {exc}",
             )
 
+    async def _run_news_press(
+        self, ctx: JobContext, project: Project, force_refresh: bool
+    ) -> None:
+        key = "news_press"
+        await ctx.update_subtask(key, status="RUNNING", progress_pct=20, log_message="자사·경쟁사 언론 보도 수집 중")
+        client = ApifyClient()
+        try:
+            brand_names = [project.brand_name] + [c.brand_name for c in project.competitors[:3]]
+            rows = await client.collect_korean_news_press(
+                brand_names=brand_names,
+                product_name=project.product_name,
+                force_refresh=force_refresh,
+            )
+            entities: list[RawSourceItem] = []
+            for r in rows:
+                b_name = str(r.get("brand_name") or project.brand_name)
+                sec = SectionCode.OWN.value if b_name == project.brand_name else SectionCode.COMPETITOR.value
+                content = str(r.get("content") or r.get("title") or "")
+                quote = extract_best_evidence_quote(content, [b_name, project.product_name])
+                spans, verified = compute_highlight_spans(content, quote)
+                entities.append(
+                    RawSourceItem(
+                        project_id=project.id,
+                        section_code=sec,
+                        provider="APIFY",
+                        channel="news_press",
+                        title=str(r.get("title") or "언론 보도 기사")[:480],
+                        content=content,
+                        source_url=r.get("source_url"),
+                        published_at=utcnow_naive(),
+                        evidence_quote=quote,
+                        highlight_spans=spans,
+                        sentiment="NEUTRAL",
+                        review_status="PENDING",
+                        metadata_json={
+                            "brand_name": b_name,
+                            "topic_tag": r.get("topic_tag") or "일반 보도",
+                            "published_date_raw": r.get("published_at"),
+                            "is_quote_verified": verified,
+                        },
+                    )
+                )
+
+            async with self._db_write_lock:
+                async with self.session_factory() as session:
+                    await session.execute(
+                        delete(RawSourceItem).where(
+                            RawSourceItem.project_id == project.id,
+                            RawSourceItem.channel == "news_press",
+                        )
+                    )
+                    session.add_all(entities)
+                    await session.commit()
+
+            await ctx.update_subtask(
+                key,
+                status="COMPLETED",
+                progress_pct=100,
+                collected_count=len(entities),
+                log_message=f"언론 보도 기사 {len(entities)}건 저장 완료",
+            )
+        except Exception as exc:
+            await ctx.update_subtask(
+                key,
+                status="FAILED",
+                progress_pct=100,
+                error_message=str(exc),
+                log_message=f"실패: {exc}",
+            )
+
     async def _run_creator_collab(
         self, ctx: JobContext, project: Project, force_refresh: bool
     ) -> None:
@@ -613,6 +756,76 @@ class CollectionOrchestrator:
                 log_message=f"실패: {exc}",
             )
 
+    async def _run_news_press(
+        self, ctx: JobContext, project: Project, force_refresh: bool
+    ) -> None:
+        key = "news_press"
+        await ctx.update_subtask(key, status="RUNNING", progress_pct=20, log_message="자사·경쟁사 언론 보도 수집 중")
+        client = ApifyClient()
+        try:
+            brand_names = [project.brand_name] + [c.brand_name for c in project.competitors[:3]]
+            rows = await client.collect_korean_news_press(
+                brand_names=brand_names,
+                product_name=project.product_name,
+                force_refresh=force_refresh,
+            )
+            entities: list[RawSourceItem] = []
+            for r in rows:
+                b_name = str(r.get("brand_name") or project.brand_name)
+                sec = SectionCode.OWN.value if b_name == project.brand_name else SectionCode.COMPETITOR.value
+                content = str(r.get("content") or r.get("title") or "")
+                quote = extract_best_evidence_quote(content, [b_name, project.product_name])
+                spans, verified = compute_highlight_spans(content, quote)
+                entities.append(
+                    RawSourceItem(
+                        project_id=project.id,
+                        section_code=sec,
+                        provider="APIFY",
+                        channel="news_press",
+                        title=str(r.get("title") or "언론 보도 기사")[:480],
+                        content=content,
+                        source_url=r.get("source_url"),
+                        published_at=utcnow_naive(),
+                        evidence_quote=quote,
+                        highlight_spans=spans,
+                        sentiment="NEUTRAL",
+                        review_status="PENDING",
+                        metadata_json={
+                            "brand_name": b_name,
+                            "topic_tag": r.get("topic_tag") or "일반 보도",
+                            "published_date_raw": r.get("published_at"),
+                            "is_quote_verified": verified,
+                        },
+                    )
+                )
+
+            async with self._db_write_lock:
+                async with self.session_factory() as session:
+                    await session.execute(
+                        delete(RawSourceItem).where(
+                            RawSourceItem.project_id == project.id,
+                            RawSourceItem.channel == "news_press",
+                        )
+                    )
+                    session.add_all(entities)
+                    await session.commit()
+
+            await ctx.update_subtask(
+                key,
+                status="COMPLETED",
+                progress_pct=100,
+                collected_count=len(entities),
+                log_message=f"언론 보도 기사 {len(entities)}건 저장 완료",
+            )
+        except Exception as exc:
+            await ctx.update_subtask(
+                key,
+                status="FAILED",
+                progress_pct=100,
+                error_message=str(exc),
+                log_message=f"실패: {exc}",
+            )
+
     async def _run_community_voc(
         self, ctx: JobContext, project: Project, force_refresh: bool
     ) -> None:
@@ -668,6 +881,7 @@ class CollectionOrchestrator:
                         delete(RawSourceItem).where(
                             RawSourceItem.project_id == project.id,
                             RawSourceItem.provider == "APIFY",
+                            RawSourceItem.channel != "news_press",
                         )
                     )
                     session.add_all(entities)
@@ -679,6 +893,76 @@ class CollectionOrchestrator:
                 progress_pct=100,
                 collected_count=len(entities),
                 log_message=f"커뮤니티·블로그·카페 VOC {len(entities)}건 저장 완료",
+            )
+        except Exception as exc:
+            await ctx.update_subtask(
+                key,
+                status="FAILED",
+                progress_pct=100,
+                error_message=str(exc),
+                log_message=f"실패: {exc}",
+            )
+
+    async def _run_news_press(
+        self, ctx: JobContext, project: Project, force_refresh: bool
+    ) -> None:
+        key = "news_press"
+        await ctx.update_subtask(key, status="RUNNING", progress_pct=20, log_message="자사·경쟁사 언론 보도 수집 중")
+        client = ApifyClient()
+        try:
+            brand_names = [project.brand_name] + [c.brand_name for c in project.competitors[:3]]
+            rows = await client.collect_korean_news_press(
+                brand_names=brand_names,
+                product_name=project.product_name,
+                force_refresh=force_refresh,
+            )
+            entities: list[RawSourceItem] = []
+            for r in rows:
+                b_name = str(r.get("brand_name") or project.brand_name)
+                sec = SectionCode.OWN.value if b_name == project.brand_name else SectionCode.COMPETITOR.value
+                content = str(r.get("content") or r.get("title") or "")
+                quote = extract_best_evidence_quote(content, [b_name, project.product_name])
+                spans, verified = compute_highlight_spans(content, quote)
+                entities.append(
+                    RawSourceItem(
+                        project_id=project.id,
+                        section_code=sec,
+                        provider="APIFY",
+                        channel="news_press",
+                        title=str(r.get("title") or "언론 보도 기사")[:480],
+                        content=content,
+                        source_url=r.get("source_url"),
+                        published_at=utcnow_naive(),
+                        evidence_quote=quote,
+                        highlight_spans=spans,
+                        sentiment="NEUTRAL",
+                        review_status="PENDING",
+                        metadata_json={
+                            "brand_name": b_name,
+                            "topic_tag": r.get("topic_tag") or "일반 보도",
+                            "published_date_raw": r.get("published_at"),
+                            "is_quote_verified": verified,
+                        },
+                    )
+                )
+
+            async with self._db_write_lock:
+                async with self.session_factory() as session:
+                    await session.execute(
+                        delete(RawSourceItem).where(
+                            RawSourceItem.project_id == project.id,
+                            RawSourceItem.channel == "news_press",
+                        )
+                    )
+                    session.add_all(entities)
+                    await session.commit()
+
+            await ctx.update_subtask(
+                key,
+                status="COMPLETED",
+                progress_pct=100,
+                collected_count=len(entities),
+                log_message=f"언론 보도 기사 {len(entities)}건 저장 완료",
             )
         except Exception as exc:
             await ctx.update_subtask(
