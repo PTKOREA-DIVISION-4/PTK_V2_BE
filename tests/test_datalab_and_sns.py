@@ -5,7 +5,11 @@ from datetime import date, datetime
 import pytest
 
 from app.integrations.naver_datalab_client import NaverDataLabClient
+from app.models.collection import RawSourceItem
+from app.models.project import CompetitorTarget, Project
 from app.services.datalab_metrics_service import DataLabMetricsService
+from app.services.press_metrics_service import PressMetricsService
+from app.services.research_query_planner import build_perplexity_queries
 from app.services.sns_ranking_service import SnsRankingService
 
 
@@ -137,3 +141,74 @@ def test_sns_period_filter_and_top5_ranking() -> None:
     assert top5[0]["likes"] == 700
     collab_posts = [p for p in top5 if p["is_creator_collab"]]
     assert len(collab_posts) == 1
+
+
+def test_research_query_planner_1on1_competitors_and_benchmarks() -> None:
+    proj = Project(
+        name="테스트 팩트북",
+        brand_name="브랜드A",
+        product_name="대표제품",
+        industry_category="뷰티/화장품",
+        analysis_track="REVIEW_CENTRIC",
+        period_start=date(2026, 9, 1),
+        period_end=date(2026, 11, 25),
+    )
+    proj.competitors = [
+        CompetitorTarget(brand_name="경쟁사1", product_name="라인1", display_order=0),
+        CompetitorTarget(brand_name="경쟁사2", product_name="라인2", display_order=1),
+        CompetitorTarget(brand_name="경쟁사3", product_name="라인3", display_order=2),
+    ]
+    queries = build_perplexity_queries(proj)
+    assert len(queries) == 11
+    titles = "\n".join(q.title for q in queries)
+    assert "[경쟁 1] 경쟁사1" in titles
+    assert "[경쟁 2] 경쟁사2" in titles
+    assert "[경쟁 3] 경쟁사3" in titles
+    assert "벤치마크" in titles
+
+
+def test_press_metrics_service_aggregation() -> None:
+    sources = [
+        RawSourceItem(
+            project_id="p1",
+            section_code="1_OWN",
+            provider="APIFY",
+            channel="news_press",
+            title="브랜드A 신제품 컬렉션 출시 보도",
+            content="2026.10 신제품 런칭 성과",
+            source_url="https://news.example.com/1",
+            review_status="APPROVED",
+            metadata_json={
+                "brand_name": "브랜드A",
+                "topic_tag": "신제품 출시",
+                "published_date_raw": "2026-10-12",
+            },
+        ),
+        RawSourceItem(
+            project_id="p1",
+            section_code="3_COMPETITOR",
+            provider="APIFY",
+            channel="news_press",
+            title="경쟁사1 팝업 스토어 오픈",
+            content="2026.11 성수 팝업 오픈",
+            source_url="https://news.example.com/2",
+            review_status="PENDING",
+            metadata_json={
+                "brand_name": "경쟁사1",
+                "topic_tag": "팝업·체험",
+                "published_date_raw": "2026-11-03",
+            },
+        ),
+    ]
+    summary = PressMetricsService.summarize_press(
+        sources=sources,
+        brand_names=["브랜드A", "경쟁사1", "경쟁사2"],
+    )
+    assert summary["total_articles"] == 2
+    assert summary["monthly_items"] == [
+        {"label": "2026-10", "value": 1, "highlight": False},
+        {"label": "2026-11", "value": 1, "highlight": False},
+    ]
+    assert summary["brand_items"][0]["value"] == 1
+    assert summary["brand_items"][1]["value"] == 1
+    assert summary["brand_items"][2]["value"] == 0
