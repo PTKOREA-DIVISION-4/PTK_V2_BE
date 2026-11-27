@@ -11,8 +11,10 @@ from app.models.factbook import FactItem, SlideDraft
 from app.models.project import Project
 from app.schemas.common import SectionCode, SummarySplitMode
 from app.services.deck_blueprint import (
+    attach_verified_source_urls,
     build_deterministic_deck,
     clean_slide_text,
+    recompute_index_slide,
     sanitize_slide_draft,
     smart_truncate,
 )
@@ -27,7 +29,7 @@ def _sanitize_bullets(raw_list: Any, fallback: list[dict[str, Any]]) -> list[dic
     seen_claims: set[str] = set()
     for item in raw_list[:4]:
         if isinstance(item, str):
-            claim = smart_truncate(item, 145)
+            claim = smart_truncate(item, 150)
             if not claim or claim in seen_claims:
                 continue
             seen_claims.add(claim)
@@ -43,16 +45,17 @@ def _sanitize_bullets(raw_list: Any, fallback: list[dict[str, Any]]) -> list[dic
             continue
         if not isinstance(item, dict):
             continue
-        claim = smart_truncate(item.get("claim"), 145)
+        claim = smart_truncate(item.get("claim"), 150)
         if not claim or claim in seen_claims:
             continue
         seen_claims.add(claim)
+        raw_url = str(item.get("source_url") or "").strip()
         cleaned.append(
             {
                 "claim": claim,
                 "evidence_quote": smart_truncate(item.get("evidence_quote"), 130) or None,
-                "source_name": smart_truncate(item.get("source_name"), 36) or None,
-                "source_url": item.get("source_url"),
+                "source_name": smart_truncate(item.get("source_name"), 40) or None,
+                "source_url": raw_url if raw_url.startswith("http") else None,
                 "fact_id": item.get("fact_id"),
             }
         )
@@ -68,10 +71,10 @@ def _sanitize_table(raw_tbl: Any, fallback: dict[str, Any] | None) -> dict[str, 
         return fallback
     n_cols = len(headers)
     clean_rows: list[list[str]] = []
-    for r in rows_raw[:6]:
+    for r in rows_raw[:7]:
         if not isinstance(r, list):
             continue
-        padded = [smart_truncate(str(r[i]), 78) if i < len(r) else "-" for i in range(n_cols)]
+        padded = [smart_truncate(str(r[i]), 82) if i < len(r) else "-" for i in range(n_cols)]
         clean_rows.append(padded)
     return {"headers": headers, "rows": clean_rows} if clean_rows else fallback
 
@@ -83,16 +86,16 @@ def _sanitize_kpis(raw_kpis: Any, fallback: list[dict[str, Any]]) -> list[dict[s
     for item in raw_kpis[:4]:
         if not isinstance(item, dict):
             continue
-        label = clean_slide_text(item.get("label"))[:24]
-        val = clean_slide_text(item.get("value"))[:22]
+        label = clean_slide_text(item.get("label"))[:26]
+        val = clean_slide_text(item.get("value"))[:24]
         if not label or not val:
             continue
         out.append(
             {
                 "label": label,
                 "value": val,
-                "delta": clean_slide_text(item.get("delta"))[:28] or None,
-                "basis": clean_slide_text(item.get("basis"))[:30] or None,
+                "delta": clean_slide_text(item.get("delta"))[:32] or None,
+                "basis": clean_slide_text(item.get("basis"))[:32] or None,
             }
         )
     return out or fallback
@@ -106,24 +109,73 @@ def _sanitize_bar_items(raw_items: Any) -> list[dict[str, Any]]:
         if not isinstance(it, dict):
             continue
         label = clean_slide_text(it.get("label"))[:26]
-        val = it.get("value")
         try:
-            num = float(val)
+            num = float(it.get("value"))
         except (TypeError, ValueError):
             continue
         if label and num > 0:
-            out.append(
-                {
-                    "label": label,
-                    "value": round(num, 2),
-                    "highlight": bool(it.get("highlight", False)),
-                }
-            )
+            out.append({"label": label, "value": round(num, 2), "highlight": bool(it.get("highlight", False))})
+    return out
+
+
+def _sanitize_price_discount_items(raw_items: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for it in raw_items[:6]:
+        if not isinstance(it, dict):
+            continue
+        label = clean_slide_text(it.get("label"))[:24]
+        try:
+            list_p = float(it.get("list_price", 0))
+            sale_p = float(it.get("sale_price", list_p))
+        except (TypeError, ValueError):
+            continue
+        if not label or list_p <= 0 or sale_p <= 0:
+            continue
+        disc = it.get("discount_pct")
+        try:
+            disc_val = round(float(disc), 1)
+        except (TypeError, ValueError):
+            disc_val = round(max(0.0, (1.0 - sale_p / list_p) * 100.0), 1)
+        out.append(
+            {
+                "label": label,
+                "list_price": round(list_p, 1),
+                "sale_price": round(sale_p, 1),
+                "discount_pct": disc_val,
+            }
+        )
+    return out
+
+
+def _sanitize_heatmap_rows(raw_rows: Any, brands: list[str]) -> list[dict[str, Any]]:
+    if not isinstance(raw_rows, list) or not brands:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in raw_rows[:6]:
+        if not isinstance(row, dict):
+            continue
+        axis = clean_slide_text(row.get("axis"))[:22]
+        raw_scores = row.get("scores")
+        if not axis or not isinstance(raw_scores, list):
+            continue
+        scores: list[dict[str, Any]] = []
+        for idx, b in enumerate(brands):
+            sc_obj = raw_scores[idx] if idx < len(raw_scores) else {}
+            raw_val = sc_obj.get("score") if isinstance(sc_obj, dict) else sc_obj
+            try:
+                val = int(round(float(raw_val)))
+            except (TypeError, ValueError):
+                val = 1
+            val = max(1, min(5, val))
+            scores.append({"brand": b, "score": val})
+        out.append({"axis": axis, "scores": scores})
     return out
 
 
 class DeckSynthesizer:
-    """Enriches grounded deterministic slides via 3 concurrent Claude synthesis batches."""
+    """Runs 8 focused concurrent Claude synthesis batches to transform evidence into 36~42 grounded Factbook slides."""
 
     def __init__(self, claude: AnthropicClient) -> None:
         self.claude = claude
@@ -149,7 +201,7 @@ class DeckSynthesizer:
             split_mode=split_mode,
         )
 
-        context_payload = self._build_evidence_context(
+        ctx = self._build_evidence_context(
             project=project,
             sources=sources,
             facts=facts,
@@ -157,14 +209,16 @@ class DeckSynthesizer:
             sns_posts=sns_posts,
         )
 
-        batch1a_task = self._run_batch_overview_own(project, context_payload)
-        batch1b_task = self._run_batch_market(project, context_payload)
-        batch2_task = self._run_batch_competitor(project, context_payload)
-        batch3_task = self._run_batch_consumer(project, context_payload)
-        batch4_task = self._run_batch_summary_conclusion(project, context_payload, split_mode)
-
         batches = await asyncio.gather(
-            batch1a_task, batch1b_task, batch2_task, batch3_task, batch4_task, return_exceptions=True
+            self._run_batch_overview_own_core(project, ctx),
+            self._run_batch_own_channels_press(project, ctx),
+            self._run_batch_market(project, ctx),
+            self._run_batch_comp_matrix_detail(project, ctx),
+            self._run_batch_comp_sns_press_mkt(project, ctx),
+            self._run_batch_consumer_voc(project, ctx),
+            self._run_batch_consumer_trends_bench(project, ctx),
+            self._run_batch_summary_conclusion(project, ctx, split_mode),
+            return_exceptions=True,
         )
 
         merged: dict[str, Any] = {}
@@ -175,7 +229,10 @@ class DeckSynthesizer:
                 merged.update(res)
 
         if merged:
-            self._apply_synthesis(deck, merged, split_mode)
+            self._apply_synthesis(deck, merged, split_mode, project)
+
+        recompute_index_slide(deck)
+        attach_verified_source_urls(deck, sources, sns_posts)
         return [sanitize_slide_draft(s) for s in deck]
 
     @staticmethod
@@ -191,12 +248,25 @@ class DeckSynthesizer:
             {
                 "section": s.section_code,
                 "title": clean_slide_text(s.title)[:100],
-                "content": clean_slide_text(s.content)[:2500],
+                "content": clean_slide_text(s.content)[:2200],
+                "url": s.source_url,
                 "citations": (s.metadata_json or {}).get("citations", [])[:5],
             }
             for s in sources
             if s.provider == "PERPLEXITY"
         ]
+        news_items = [
+            {
+                "title": clean_slide_text(s.title)[:100],
+                "content": clean_slide_text(s.content)[:240],
+                "domain": (s.metadata_json or {}).get("publisher", s.author or ""),
+                "date": (s.metadata_json or {}).get("published_at", ""),
+                "topic": (s.metadata_json or {}).get("topic", ""),
+                "url": s.source_url,
+            }
+            for s in sources
+            if s.channel == "news_press"
+        ][:20]
         sns_profiles = [
             {
                 "content": clean_slide_text(s.content),
@@ -219,7 +289,7 @@ class DeckSynthesizer:
             }
             for f in facts
             if f.section_code == SectionCode.CONSUMER.value
-        ][:26]
+        ][:28]
         dl_items = [
             {
                 "metric": d.metric_type,
@@ -244,147 +314,197 @@ class DeckSynthesizer:
                 "caption": clean_slide_text(p.caption)[:110],
                 "url": p.post_url,
             }
-            for p in sns_posts[:14]
+            for p in sns_posts[:16]
         ]
         return {
             "target": f"{project.brand_name} / {project.product_name} ({project.industry_category})",
             "period": f"{project.period_start}~{project.period_end}",
             "competitors": [f"{c.brand_name} {c.product_name}".strip() for c in project.competitors],
             "perplexity_reports": perplexity_reports,
+            "news_items": news_items,
             "datalab": dl_items,
             "sns_profiles": sns_profiles,
             "sns_posts": sns_items,
             "consumer_voc": voc_items,
         }
 
-    async def _run_batch_overview_own(
+    async def _run_batch_overview_own_core(
         self, project: Project, ctx: dict[str, Any]
     ) -> dict[str, Any]:
-        own_reports = [
-            r for r in ctx["perplexity_reports"] if r["section"] in {"1_OWN", "3_COMPETITOR"}
-        ]
-        market_brief = [
-            {"title": r["title"], "excerpt": r["content"][:900]}
-            for r in ctx["perplexity_reports"]
-            if r["section"] == "2_MARKET"
-        ]
+        own_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"1_OWN", "3_COMPETITOR"}]
         prompt = (
             f"타겟: {ctx['target']} | 기간: {ctx['period']} | 경쟁: {', '.join(ctx['competitors']) or '없음'}\n\n"
             f"[Perplexity 자사·경쟁 리서치]\n{json.dumps(own_reports, ensure_ascii=False)}\n\n"
-            f"[시장 요약]\n{json.dumps(market_brief, ensure_ascii=False)}\n\n"
             f"[데이터랩]\n{json.dumps(ctx['datalab'], ensure_ascii=False)}\n\n"
-            f"[SNS 계정/게시물]\n{json.dumps({'profiles': ctx['sns_profiles'], 'posts': ctx['sns_posts']}, ensure_ascii=False)}\n\n"
-            "아래 6개 슬라이드 블록 JSON을 작성해줘. 제공된 자료에 없는 숫자는 절대 지어내지 말고 '확인 못 함'으로 표기해.\n"
-            "중요 규칙: 음수(-12.5%, -3.4% 등)의 마이너스(-) 부호를 절대 빼먹지 말 것! 마크다운(**)과 [1][2] 각주 기호 금지.\n"
-            "JSON 문자열 값 안에서는 큰따옴표(\") 대신 작은따옴표(')만 사용하고 줄바꿈을 넣지 마.\n"
-            "모든 표 셀은 완결된 짧은 명사/문장(<=36자, 문장 중간 끊김 금지)으로 작성하고, headcopy는 겹치지 않는 결론형 1문장(50~85자).\n"
-            "모든 슬라이드 블록에는 반드시 서로 다른 관점의 bullets 3개({claim, evidence_quote, source_name})를 포함해.\n"
+            "아래 4개 슬라이드 블록 JSON을 작성해줘. 근거 없는 숫자 창작 금지(없으면 '확인 못 함').\n"
+            "중요: 음수('-') 부호 유지, 마크다운(**)/각주([1]) 금지, 문자열 내 큰따옴표 대신 작은따옴표(') 사용.\n"
+            "각 블록은 서로 다른 관점의 bullets 3개({claim, evidence_quote, source_name, source_url}) 포함.\n"
             "반환 JSON 키:\n"
             "- overview: {headcopy, bullets(3개), footnote}\n"
-            "- own_profile: {headcopy, kpi_cards:[{label, value, delta, basis}] (최대4개 — 하락폭은 반드시 '-' 표기), table:{headers, rows}, bullets(3개), footnote}\n"
-            "- own_products_price: {headcopy, table:{headers:['모델/라인','특징·소재','공식가/행사가','출처'], rows}, chart_items:[{label, value(숫자만, 예: 31.9), highlight(bool)}] (최소 3개 이상), chart_unit:'만원', chart_title, bullets(3개), footnote}\n"
-            "- own_channels: {headcopy(자사 공식 SNS 팔로워/구독자 규모 및 채널 운영 밀도를 핵심으로), bullets(3개 — 자사 유튜브/인스타 팔로워 vs 경쟁 SNS 계정 규모·조회 효율·유통 채널 연결 진단), footnote}\n"
-            "- own_sns_top5: {headcopy, bullets(3개 — 자사 TOP 5 포맷·조회수·협찬 패턴 관찰), footnote}\n"
-            "- own_campaigns: {headcopy, table:{headers:['구분/일시','활동/보도명','핵심 내용·성과','출처'], rows}, bullets(3개), footnote}"
+            "- own_profile: {headcopy, kpi_cards(최대4개), table:{headers:['진단 구분','핵심 지표','출처'], rows}, bullets(3개), footnote}\n"
+            "- own_new_products: {headcopy, table:{headers:['라인업/신제품','핵심 스펙·USP','타겟 용도','출처'], rows(3~4행)}, bullets(3개), footnote}\n"
+            "- own_products_price: {headcopy, table:{headers:['라인업/규격','특징·소재','정가 / 할인가(할인율)','출처'], rows(3~5행)}, "
+            "price_discount_items:[{label, list_price(만원 숫자), sale_price(만원 숫자), discount_pct(% 숫자)}](3~5개, 원문 가격 확인 시만), bullets(3개), footnote}"
         )
         return await self.claude.complete_json(
             system_prompt=(
                 "You are a senior strategy director at PTKOREA Division 4 building a verified Korean Factbook. "
-                "Never invent statistics or strip negative '-' signs from declines. Never use unescaped double quotes inside JSON strings. "
-                "Write '확인 못 함' only when genuinely unverified. Return valid RFC8259 JSON only."
+                "Never invent statistics or strip negative '-' signs. Return valid RFC8259 JSON only."
             ),
             user_prompt=prompt,
-            max_tokens=5800,
+            max_tokens=5200,
+        )
+
+    async def _run_batch_own_channels_press(
+        self, project: Project, ctx: dict[str, Any]
+    ) -> dict[str, Any]:
+        own_reports = [r for r in ctx["perplexity_reports"] if r["section"] == "1_OWN"]
+        own_posts = [p for p in ctx["sns_posts"] if p["owner"] == "OWN"]
+        prompt = (
+            f"타겟: {ctx['target']} | 기간: {ctx['period']}\n\n"
+            f"[자사 리서치]\n{json.dumps(own_reports, ensure_ascii=False)}\n\n"
+            f"[SNS 계정/자사 게시물]\n{json.dumps({'profiles': ctx['sns_profiles'], 'posts': own_posts}, ensure_ascii=False)}\n\n"
+            f"[언론 보도 샘플]\n{json.dumps(ctx['news_items'][:10], ensure_ascii=False)}\n\n"
+            "아래 5개 자사 채널·PR 블록 JSON을 작성해줘. 마크다운(**)/각주([1]) 금지, 문자열 내 작은따옴표(')만 사용.\n"
+            "각 블록 bullets 3개({claim, evidence_quote, source_name, source_url}) 필수.\n"
+            "반환 JSON 키:\n"
+            "- own_channels: {headcopy, bullets(3개 — 공식 채널 팔로워·효율 진단), footnote}\n"
+            "- own_instagram_top5: {headcopy, bullets(3개 — 자사 인스타그램 고반응 콘텐츠 패턴·시사점), footnote}\n"
+            "- own_youtube_top5: {headcopy, bullets(3개 — 자사 유튜브 영상 조회·시청 지속 요인), footnote}\n"
+            "- own_creator_collabs: {headcopy, table:{headers:['게시일','협업·캠페인명','채널','조회·반응','성과 특징'], rows(3~5행)}, bullets(3개), footnote}\n"
+            "- own_press_analysis: {headcopy, bullets(3개 — 자사 언론 보도 시기별 이슈·핵심 PR 논조), footnote}"
+        )
+        return await self.claude.complete_json(
+            system_prompt=(
+                "You are a senior digital & PR director at PTKOREA Division 4. "
+                "Analyze owned IG, YT, creator collaborations, and Korean news press strictly from provided data. Return valid JSON only."
+            ),
+            user_prompt=prompt,
+            max_tokens=4800,
         )
 
     async def _run_batch_market(
         self, project: Project, ctx: dict[str, Any]
     ) -> dict[str, Any]:
-        mkt_reports = [
-            r for r in ctx["perplexity_reports"] if r["section"] in {"2_MARKET"}
-        ]
-        comp_price_brief = [
-            {"title": r["title"], "excerpt": r["content"][:1200]}
-            for r in ctx["perplexity_reports"]
-            if r["section"] == "3_COMPETITOR"
-        ]
+        mkt_reports = [r for r in ctx["perplexity_reports"] if r["section"] == "2_MARKET"]
         prompt = (
             f"타겟: {ctx['target']} | 기간: {ctx['period']} | 경쟁: {', '.join(ctx['competitors']) or '없음'}\n\n"
             f"[Perplexity 시장·유통·플레이어 리서치]\n{json.dumps(mkt_reports, ensure_ascii=False)}\n\n"
-            f"[경쟁 가격/라인 참고]\n{json.dumps(comp_price_brief, ensure_ascii=False)}\n\n"
             f"[데이터랩 요약]\n{json.dumps(ctx['datalab'], ensure_ascii=False)}\n\n"
-            "아래 3개 시장 분석 슬라이드 블록 JSON을 작성해줘. 제공된 자료에 없는 숫자는 절대 지어내지 말고 '확인 못 함'으로 표기해.\n"
-            "중요 규칙: 음수(-3.4% 등)의 마이너스(-) 부호를 절대 빼먹지 말 것! 마크다운(**)과 [1][2] 각주 기호 금지.\n"
-            "JSON 문자열 값 안에서는 큰따옴표(\") 대신 작은따옴표(')만 사용하고 줄바꿈을 넣지 마.\n"
-            "모든 표 셀은 완결된 짧은 명사/문장(<=36자, 문장 중간 끊김 금지)으로 작성하고, headcopy는 결론형 1문장(50~85자).\n"
+            "아래 4개 시장 분석 슬라이드 블록 JSON을 작성해줘. 근거 없는 숫자 금지(없으면 '확인 못 함').\n"
             "반환 JSON 키:\n"
-            "- market_overview: {headcopy, kpi_cards(최대4개), table:{headers:['구분/기관','시장 수치','성장률·기준'], rows}, chart_items:[{label, value(숫자만, 예: 13.7), highlight(bool)}] (최소 3개), chart_unit, chart_title, bullets(3개), footnote}\n"
+            "- market_overview: {headcopy, kpi_cards(최대4개), table:{headers:['구분/기관','시장 수치','성장률·기준'], rows}, chart_items:[{label, value(숫자만), highlight(bool)}], chart_unit, chart_title, bullets(3개), footnote}\n"
+            "- market_demand_trend: {headcopy, table:{headers:['검색 그룹','구분','전후반기 증감','피크 시점'], rows}, bullets(3개 — 계절성·검색 피크 드라이버), footnote}\n"
             "- market_signals: {headcopy, table:{headers:['신호/규제 항목','관찰 내용 및 근거 수치','전략적 시사점'], rows}, bullets(3개), footnote}\n"
             "- market_players: {headcopy, table:{headers:['유형','브랜드','포지션 근거','가격대','주 채널'], rows}, bullets(3개), footnote}"
         )
         return await self.claude.complete_json(
             system_prompt=(
                 "You are a senior market research director at PTKOREA Division 4. "
-                "Synthesize macro market sizing, retail signals, and player landscape strictly from verified Perplexity reports. "
-                "Never use unescaped double quotes inside JSON strings. Return valid RFC8259 JSON only."
+                "Synthesize macro market sizing, seasonal demand, retail signals, and player landscape strictly from verified sources. Return valid JSON only."
             ),
             user_prompt=prompt,
-            max_tokens=4500,
+            max_tokens=5000,
         )
 
-    async def _run_batch_competitor(
+    async def _run_batch_comp_matrix_detail(
         self, project: Project, ctx: dict[str, Any]
     ) -> dict[str, Any]:
-        comp_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"3_COMPETITOR", "1_OWN", "2_MARKET"}]
+        comp_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"3_COMPETITOR", "1_OWN"}]
+        n_comp = min(4, len(project.competitors))
+        comp_list_desc = ", ".join(f"{c.brand_name} {c.product_name}" for c in project.competitors[:4]) or "없음"
         prompt = (
-            f"타겟: {ctx['target']} | 경쟁: {', '.join(ctx['competitors']) or '없음'}\n\n"
-            f"[Perplexity 경쟁·자사·시장 리서치]\n{json.dumps(comp_reports, ensure_ascii=False)}\n\n"
+            f"타겟: {ctx['target']} | 비교 경쟁사({n_comp}개): {comp_list_desc}\n\n"
+            f"[경쟁·자사 리서치]\n{json.dumps(comp_reports, ensure_ascii=False)}\n\n"
             f"[데이터랩]\n{json.dumps(ctx['datalab'], ensure_ascii=False)}\n\n"
-            f"[SNS 게시물]\n{json.dumps(ctx['sns_posts'], ensure_ascii=False)}\n\n"
-            "아래 4개 경쟁사 슬라이드 블록 JSON을 작성해줘. 근거 없는 수치 생성 금지(자료에 전혀 없는 항목만 '확인 못 함').\n"
-            "중요: 리서치에서 경쟁 브랜드별 대표 캐리어 가격대·포지셔닝·마케팅 활동(캠페인·이벤트·SNS·협업·바이럴·PR)이 확인되면 반드시 구체적으로 채워 넣고(완결된 36자 이내 명사구), 정말 확인되지 않는 셀만 '확인 못 함' 표기.\n"
-            "마크다운(**) 및 [1] 금지. JSON 문자열 값 안에서는 큰따옴표(\") 대신 작은따옴표(')만 사용해.\n"
-            "모든 슬라이드 블록에는 반드시 서로 다른 관점의 bullets 3개({claim, evidence_quote, source_name})를 포함해줘.\n"
+            "아래 3개 키(경쟁 매트릭스·가격 추이·경쟁사 1:1 상세 배열) JSON을 작성해줘.\n"
+            "마크다운(**)/각주([1]) 금지, 문자열 내 작은따옴표(') 사용.\n"
             "반환 JSON 키:\n"
-            "- competitor_matrix: {headcopy, table:{headers:['구분','자사','경쟁1','경쟁2','경쟁3'], rows(최대5행)}, bullets(3개 — 검색 vs 쇼핑 SoS 격차 해석 포함), footnote}\n"
+            "- competitor_matrix: {headcopy, table:{headers:['구분','자사','경쟁1','경쟁2','경쟁3'], rows(최대5행)}, bullets(3개), footnote}\n"
             "- competitor_price_trend: {headcopy, table:{headers:['브랜드/모델','규격·기준 가격','포지션 특징'], rows}, bullets(3개), footnote}\n"
-            "- competitor_sns_top5: {headcopy, bullets(3개 — 경쟁사 콘텐츠 강점·자사 대비 차이), footnote}\n"
-            "- competitor_marketing_6: {headcopy, table:{headers:['활동 분류','자사','경쟁1','경쟁2','경쟁3'], rows(정확히 6행: 디지털 캠페인, 온라인 이벤트, 소셜 콘텐츠, 인플루언서 협업, 바이럴·커뮤니티, 미디어·PR — 각 셀 <=36자 완결형)}, bullets(3개), footnote}"
+            f"- competitor_details: 길이 {n_comp} 배열(경쟁사 순서 일치). 각 원소={{headcopy, table:{{headers:['비교 항목','경쟁사 현황','자사 대비 시사점'], rows(3~4행)}}, bullets(3개), footnote}}"
         )
         return await self.claude.complete_json(
             system_prompt=(
                 "You are a senior competitive intelligence director at PTKOREA Division 4. "
-                "Extract every verified competitor fact from Perplexity, DataLab, and SNS sources without inventing numbers. Keep cells concise and complete (no mid-sentence truncation). Return valid RFC8259 JSON only."
+                "Produce sharp 1:1 competitor deep dives strictly grounded in collected research and DataLab metrics. Return valid JSON only."
             ),
             user_prompt=prompt,
-            max_tokens=6200,
+            max_tokens=5800,
         )
 
-    async def _run_batch_consumer(
+    async def _run_batch_comp_sns_press_mkt(
         self, project: Project, ctx: dict[str, Any]
     ) -> dict[str, Any]:
-        cons_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"4_CONSUMER", "2_MARKET", "1_OWN"}]
+        comp_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"3_COMPETITOR", "1_OWN"}]
+        brands = [project.brand_name, *[c.brand_name for c in project.competitors[:3]]]
+        prompt = (
+            f"타겟: {ctx['target']} | 브랜드 비교축: {', '.join(brands)}\n\n"
+            f"[경쟁 리서치]\n{json.dumps(comp_reports, ensure_ascii=False)}\n\n"
+            f"[SNS 게시물]\n{json.dumps(ctx['sns_posts'], ensure_ascii=False)}\n\n"
+            f"[언론 보도]\n{json.dumps(ctx['news_items'], ensure_ascii=False)}\n\n"
+            "아래 4개 경쟁사 SNS·언론보도·마케팅 6분류 블록 JSON을 작성해줘. 각 블록 bullets 3개 필수.\n"
+            "반환 JSON 키:\n"
+            "- competitor_sns_top5: {headcopy, bullets(3개 — 경쟁사 콘텐츠 강점·자사 대비 차이), footnote}\n"
+            "- competitor_press: {headcopy, bullets(3개 — 자사 vs 경쟁사 언론 보도량 및 PR 메시지 차이), footnote}\n"
+            "- competitor_marketing_6: {headcopy, table:{headers:['활동 분류','자사','경쟁1','경쟁2','경쟁3'], "
+            "rows(정확히 6행: 디지털 캠페인, 온라인 이벤트, 소셜 콘텐츠, 인플루언서 협업, 바이럴·커뮤니티, 미디어·PR — 각 셀 <=34자 완결형)}, "
+            f"heatmap_scores:[{{axis, scores:[{{brand, score(1~5 정수)}}]}}] (6축 x 브랜드 {brands}), bullets(3개), footnote}}\n"
+            "- competitor_marketing_detail: {headcopy, table:{headers:['마케팅 축','경쟁사 대표 실행 사례','자사 전략 시사점'], rows(4~5행)}, bullets(3개), footnote}"
+        )
+        return await self.claude.complete_json(
+            system_prompt=(
+                "You are a marketing strategist at PTKOREA Division 4 auditing competitor SNS, PR coverage, and 6-axis marketing intensity. "
+                "Score heatmap cells 1-5 strictly based on collected evidence. Return valid JSON only."
+            ),
+            user_prompt=prompt,
+            max_tokens=5600,
+        )
+
+    async def _run_batch_consumer_voc(
+        self, project: Project, ctx: dict[str, Any]
+    ) -> dict[str, Any]:
+        cons_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"4_CONSUMER", "1_OWN"}]
         prompt = (
             f"타겟: {ctx['target']} | 경쟁: {', '.join(ctx['competitors']) or '없음'}\n\n"
-            f"[Perplexity 소비자·시장 리서치]\n{json.dumps(cons_reports, ensure_ascii=False)}\n\n"
+            f"[Perplexity 소비자 리서치]\n{json.dumps(cons_reports, ensure_ascii=False)}\n\n"
             f"[실소비자 커뮤니티/블로그 VOC]\n{json.dumps(ctx['consumer_voc'], ensure_ascii=False)}\n\n"
-            "아래 4개 소비자 슬라이드 블록 JSON을 작성해줘. 근거 없는 수치 생성 금지(없으면 '확인 못 함').\n"
-            "마크다운(**) 및 [1] 금지. JSON 문자열 값 안에서는 큰따옴표(\") 대신 작은따옴표(')만 사용해.\n"
-            "중요: 모든 슬라이드 블록에는 반드시 서로 다른 관점의 bullets 3개({claim, evidence_quote, source_name})를 빠짐없이 포함해줘.\n"
+            "아래 4개 소비자 분석 블록 JSON을 작성해줘. 각 블록 bullets 3개({claim, evidence_quote, source_name, source_url}) 필수.\n"
             "반환 JSON 키:\n"
             "- consumer_target: {headcopy, table:{headers:['타깃 페르소나','이용 장면','핵심 구매 기준(KBF)','불만/이탈 장벽'], rows(3~4행)}, bullets(3개), footnote}\n"
             "- consumer_voc: {headcopy, bullets(3개 — 감성 분포 및 채널별 발화 특성), footnote}\n"
             "- consumer_voc_voices: {headcopy, table:{headers:['믿고 사는 이유 (긍정 KBF 발화)','이탈·고민 요인 (우려/허들 발화)'], rows(3~4행)}, bullets(3개), footnote}\n"
-            "- consumer_trends: {headcopy, table:{headers:['트렌드/벤치마크','관찰 내용 및 성공 요인','자사 적용 방향'], rows(3~5행)}, bullets(3개), footnote}"
+            "- consumer_brand_compare: {headcopy, table:{headers:['브랜드','핵심 호감·연상 키워드','우려·이탈 키워드','표본 근거'], rows(3~4행)}, bullets(3개), footnote}"
         )
         return await self.claude.complete_json(
             system_prompt=(
                 "You are a senior consumer insights director at PTKOREA Division 4. "
-                "Extract real KBF triggers and friction points strictly from provided Korean VOC & Perplexity reports. "
-                "Never use unescaped double quotes inside string values. Return valid RFC8259 JSON only."
+                "Extract real KBF triggers, friction points, and brand perception differences strictly from Korean VOC & reports. Return valid JSON only."
             ),
             user_prompt=prompt,
-            max_tokens=6000,
+            max_tokens=5400,
+        )
+
+    async def _run_batch_consumer_trends_bench(
+        self, project: Project, ctx: dict[str, Any]
+    ) -> dict[str, Any]:
+        cons_reports = [r for r in ctx["perplexity_reports"] if r["section"] in {"4_CONSUMER", "2_MARKET"}]
+        prompt = (
+            f"타겟: {ctx['target']} | 기간: {ctx['period']}\n\n"
+            f"[소비자·소셜 트렌드 및 타 업종 벤치마크 리서치]\n{json.dumps(cons_reports, ensure_ascii=False)}\n\n"
+            f"[SNS 고반응 포맷 참고]\n{json.dumps(ctx['sns_posts'][:8], ensure_ascii=False)}\n\n"
+            "아래 3개 트렌드·벤치마크 블록 JSON을 작성해줘. 구체적 사례 브랜드와 메커니즘이 확인되면 명시하고, 없으면 '확인 못 함'.\n"
+            "반환 JSON 키:\n"
+            "- consumer_trends_social: {headcopy, table:{headers:['트렌드 영역','최근 소비·콘텐츠 변화','캠페인 적용 기회'], rows(3~4행)}, bullets(3개), footnote}\n"
+            "- consumer_benchmarks: {headcopy, table:{headers:['벤치마크 영역','선도 브랜드·사례','성과/반응 메커니즘','적용 가능성'], rows(3~4행)}, bullets(3개), footnote}\n"
+            "- consumer_benchmark_detail: {headcopy, table:{headers:['이식 과제','현재 공백(AS-IS)','실행 이식 방향(TO-BE)','기대 KPI'], rows(3~4행)}, bullets(3개), footnote}"
+        )
+        return await self.claude.complete_json(
+            system_prompt=(
+                "You are a creative & trend strategist at PTKOREA Division 4 translating social trends and cross-industry benchmarks into actionable plans. Return valid JSON only."
+            ),
+            user_prompt=prompt,
+            max_tokens=4800,
         )
 
     async def _run_batch_summary_conclusion(
@@ -393,13 +513,12 @@ class DeckSynthesizer:
         summary_count = 4 if split_mode == SummarySplitMode.SPLIT_4 else 2
         prompt = (
             f"타겟: {ctx['target']} | 기간: {ctx['period']} | 경쟁: {', '.join(ctx['competitors']) or '없음'}\n\n"
-            f"[Perplexity 요약]\n{json.dumps([{'section': r['section'], 'title': r['title'], 'excerpt': r['content'][:950]} for r in ctx['perplexity_reports']], ensure_ascii=False)}\n\n"
+            f"[Perplexity 요약]\n{json.dumps([{'section': r['section'], 'title': r['title'], 'excerpt': r['content'][:800]} for r in ctx['perplexity_reports']], ensure_ascii=False)}\n\n"
             f"[데이터랩]\n{json.dumps(ctx['datalab'], ensure_ascii=False)}\n\n"
-            f"[SNS 요약]\n{json.dumps({'profiles': ctx['sns_profiles'], 'top_posts': ctx['sns_posts'][:6]}, ensure_ascii=False)}\n\n"
+            f"[SNS·뉴스 요약]\n{json.dumps({'profiles': ctx['sns_profiles'], 'top_posts': ctx['sns_posts'][:6], 'press_count': len(ctx['news_items'])}, ensure_ascii=False)}\n\n"
             f"[VOC 샘플]\n{json.dumps(ctx['consumer_voc'][:10], ensure_ascii=False)}\n\n"
-            "아래 3개 섹션 JSON을 작성해줘. 마크다운(**), 각주([1]) 금지, 문자열 내부 큰따옴표 대신 작은따옴표(') 사용.\n"
-            "모든 표 셀은 완결형 55자 이하(중간 단어 잘림 금지).\n"
-            f"- summary_parts: 길이 {summary_count} 배열. 각 원소={{headcopy, table:{{headers:['영역','확인된 핵심 사실','전략적 의미'], rows}}, bullets:[{{claim, evidence_quote, source_name}}] (반드시 3개 객체, 겹치지 않게)}}\n"
+            "아래 3개 섹션 JSON을 작성해줘. 마크다운(**), 각주([1]) 금지, 문자열 내부 작은따옴표(') 사용.\n"
+            f"- summary_parts: 길이 {summary_count} 배열. 각 원소={{headcopy, table:{{headers:['영역','확인된 핵심 사실','전략적 의미'], rows}}, bullets:[{{claim, evidence_quote, source_name}}] (반드시 3개)}}\n"
             "- as_is_to_be: {headcopy, as_is_points(3개 완결 문장), key_issues(3개 완결 문장), to_be_directions(3개 완결 문장)}\n"
             "- data_gaps: {headcopy, table:{headers:['확인 불가(공백) 항목','미수집 사유','보완 과제'], rows(4~5행)}, bullets:[{{claim, evidence_quote, source_name}}] (2개)}"
         )
@@ -414,30 +533,48 @@ class DeckSynthesizer:
 
     @staticmethod
     def _apply_synthesis(
-        deck: list[SlideDraft], res: dict[str, Any], split_mode: SummarySplitMode
+        deck: list[SlideDraft],
+        res: dict[str, Any],
+        split_mode: SummarySplitMode,
+        project: Project,
     ) -> None:
         key_map = {
             "OVERVIEW": "overview",
             "OWN_PROFILE": "own_profile",
+            "OWN_NEW_PRODUCTS": "own_new_products",
             "OWN_PRODUCTS_PRICE": "own_products_price",
             "OWN_CHANNELS": "own_channels",
-            "OWN_SNS_TOP5": "own_sns_top5",
-            "OWN_CAMPAIGNS": "own_campaigns",
+            "OWN_INSTAGRAM_TOP5": "own_instagram_top5",
+            "OWN_YOUTUBE_TOP5": "own_youtube_top5",
+            "OWN_CREATOR_COLLABS": "own_creator_collabs",
+            "OWN_PRESS_ANALYSIS": "own_press_analysis",
             "MARKET_OVERVIEW": "market_overview",
+            "MARKET_DEMAND_TREND": "market_demand_trend",
             "MARKET_SIGNALS": "market_signals",
             "MARKET_PLAYERS": "market_players",
             "COMPETITOR_MATRIX": "competitor_matrix",
             "COMPETITOR_PRICE_TREND": "competitor_price_trend",
             "COMPETITOR_SNS_TOP5": "competitor_sns_top5",
+            "COMPETITOR_PRESS": "competitor_press",
             "COMPETITOR_MARKETING_6": "competitor_marketing_6",
+            "COMPETITOR_MARKETING_DETAIL": "competitor_marketing_detail",
             "CONSUMER_TARGET": "consumer_target",
             "CONSUMER_VOC": "consumer_voc",
             "CONSUMER_VOC_VOICES": "consumer_voc_voices",
-            "CONSUMER_TRENDS": "consumer_trends",
+            "CONSUMER_BRAND_COMPARE": "consumer_brand_compare",
+            "CONSUMER_TRENDS_SOCIAL": "consumer_trends_social",
+            "CONSUMER_BENCHMARKS": "consumer_benchmarks",
+            "CONSUMER_BENCHMARK_DETAIL": "consumer_benchmark_detail",
             "DATA_GAP": "data_gaps",
         }
-        summary_idx = 0
+        brands = [project.brand_name, *[c.brand_name for c in project.competitors[:3]]]
+        comp_details = res.get("competitor_details") if isinstance(res.get("competitor_details"), list) else []
+        comp_detail_idx = 0
         summary_parts = res.get("summary_parts") if isinstance(res.get("summary_parts"), list) else []
+        summary_idx = 0
+
+        sns_slides = {"OWN_INSTAGRAM_TOP5", "OWN_YOUTUBE_TOP5", "COMPETITOR_SNS_TOP5"}
+        press_slides = {"OWN_PRESS_ANALYSIS", "COMPETITOR_PRESS"}
 
         for slide in deck:
             if slide.slide_type in key_map:
@@ -447,9 +584,9 @@ class DeckSynthesizer:
                 hc = clean_slide_text(block.get("headcopy"))
                 if hc:
                     slide.headcopy = hc[:360]
-                if "kpi_cards" in block and slide.slide_type not in {"OWN_SNS_TOP5", "COMPETITOR_SNS_TOP5"}:
+                if "kpi_cards" in block and slide.slide_type not in (sns_slides | press_slides):
                     slide.kpi_cards_json = _sanitize_kpis(block.get("kpi_cards"), list(slide.kpi_cards_json or []))
-                if "table" in block:
+                if "table" in block and slide.slide_type not in press_slides:
                     slide.table_json = _sanitize_table(block.get("table"), slide.table_json)
                 if "bullets" in block:
                     slide.bullets_json = _sanitize_bullets(block.get("bullets"), list(slide.bullets_json or []))
@@ -457,20 +594,41 @@ class DeckSynthesizer:
                 if fn and not slide.footnote:
                     slide.footnote = fn[:480]
 
-                # Populate HORIZONTAL_BAR_CHART metadata if real numbers extracted
-                bar_items = _sanitize_bar_items(block.get("chart_items"))
-                if bar_items and slide.visual_assets_json:
-                    first = dict(slide.visual_assets_json[0])
-                    if first.get("asset_type") == "HORIZONTAL_BAR_CHART":
-                        first["title"] = clean_slide_text(block.get("chart_title"))[:60] or first.get("title")
-                        first["metadata"] = {
-                            "unit": clean_slide_text(block.get("chart_unit"))[:16],
-                            "items": bar_items,
-                        }
-                        slide.visual_assets_json = [first, *slide.visual_assets_json[1:]]
-                elif slide.visual_assets_json and slide.visual_assets_json[0].get("asset_type") == "HORIZONTAL_BAR_CHART" and not bar_items:
-                    # Drop empty chart asset so UI & PPTX render clean table/KPI without blank chart box
-                    slide.visual_assets_json = []
+                # Handle chart metadata per asset_type
+                assets = list(slide.visual_assets_json or [])
+                if assets:
+                    first = dict(assets[0])
+                    atype = first.get("asset_type")
+                    if atype == "HORIZONTAL_BAR_CHART":
+                        bar_items = _sanitize_bar_items(block.get("chart_items"))
+                        if bar_items:
+                            first["title"] = clean_slide_text(block.get("chart_title"))[:60] or first.get("title")
+                            first["metadata"] = {"unit": clean_slide_text(block.get("chart_unit"))[:16], "items": bar_items}
+                            slide.visual_assets_json = [first, *assets[1:]]
+                        else:
+                            slide.visual_assets_json = []
+                    elif atype == "PRICE_DISCOUNT_BAR":
+                        pd_items = _sanitize_price_discount_items(block.get("price_discount_items"))
+                        if pd_items:
+                            first["metadata"] = {"unit": "만원", "items": pd_items}
+                            slide.visual_assets_json = [first, *assets[1:]]
+                        else:
+                            slide.visual_assets_json = []
+                    elif atype == "MARKETING_HEATMAP":
+                        hm_rows = _sanitize_heatmap_rows(block.get("heatmap_scores"), brands)
+                        if hm_rows:
+                            first["metadata"] = {"brands": brands, "rows": hm_rows}
+                            slide.visual_assets_json = [first, *assets[1:]]
+
+            elif slide.slide_type == "COMPETITOR_DETAIL":
+                if comp_detail_idx < len(comp_details) and isinstance(comp_details[comp_detail_idx], dict):
+                    block = comp_details[comp_detail_idx]
+                    hc = clean_slide_text(block.get("headcopy"))
+                    if hc:
+                        slide.headcopy = hc[:360]
+                    slide.table_json = _sanitize_table(block.get("table"), slide.table_json)
+                    slide.bullets_json = _sanitize_bullets(block.get("bullets"), list(slide.bullets_json or []))
+                comp_detail_idx += 1
 
             elif slide.slide_type == "SUMMARY_PART":
                 if summary_idx < len(summary_parts) and isinstance(summary_parts[summary_idx], dict):
