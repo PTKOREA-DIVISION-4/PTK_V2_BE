@@ -247,8 +247,8 @@ class DeckSynthesizer:
         perplexity_reports = [
             {
                 "section": s.section_code,
-                "title": clean_slide_text(s.title)[:100],
-                "content": clean_slide_text(s.content)[:2200],
+                "title": clean_slide_text(s.title).replace('"', "'")[:100],
+                "content": clean_slide_text(s.content).replace('"', "'")[:2000],
                 "url": s.source_url,
                 "citations": (s.metadata_json or {}).get("citations", [])[:5],
             }
@@ -257,8 +257,8 @@ class DeckSynthesizer:
         ]
         news_items = [
             {
-                "title": clean_slide_text(s.title)[:100],
-                "content": clean_slide_text(s.content)[:240],
+                "title": clean_slide_text(s.title).replace('"', "'")[:100],
+                "content": clean_slide_text(s.content).replace('"', "'")[:220],
                 "domain": (s.metadata_json or {}).get("publisher", s.author or ""),
                 "date": (s.metadata_json or {}).get("published_at", ""),
                 "topic": (s.metadata_json or {}).get("topic", ""),
@@ -266,7 +266,7 @@ class DeckSynthesizer:
             }
             for s in sources
             if s.channel == "news_press"
-        ][:20]
+        ][:16]
         sns_profiles = [
             {
                 "content": clean_slide_text(s.content),
@@ -283,13 +283,13 @@ class DeckSynthesizer:
                 "fact_id": f.id,
                 "channel": f.source_name,
                 "sentiment": f.category_tag,
-                "title": clean_slide_text(f.claim_text)[:100],
-                "quote": clean_slide_text(f.evidence_quote)[:160],
+                "title": clean_slide_text(f.claim_text).replace('"', "'")[:100],
+                "quote": clean_slide_text(f.evidence_quote).replace('"', "'")[:150],
                 "url": f.source_url,
             }
             for f in facts
             if f.section_code == SectionCode.CONSUMER.value
-        ][:28]
+        ][:24]
         dl_items = [
             {
                 "metric": d.metric_type,
@@ -377,10 +377,11 @@ class DeckSynthesizer:
         return await self.claude.complete_json(
             system_prompt=(
                 "You are a senior digital & PR director at PTKOREA Division 4. "
-                "Analyze owned IG, YT, creator collaborations, and Korean news press strictly from provided data. Return valid JSON only."
+                "Analyze owned IG, YT, creator collaborations, and Korean news press strictly from provided data. "
+                "Never put unescaped double quotes or newlines inside JSON string values; use single quotes only. Return valid RFC8259 JSON only."
             ),
             user_prompt=prompt,
-            max_tokens=4800,
+            max_tokens=6400,
         )
 
     async def _run_batch_market(
@@ -479,10 +480,11 @@ class DeckSynthesizer:
         return await self.claude.complete_json(
             system_prompt=(
                 "You are a senior consumer insights director at PTKOREA Division 4. "
-                "Extract real KBF triggers, friction points, and brand perception differences strictly from Korean VOC & reports. Return valid JSON only."
+                "Extract real KBF triggers, friction points, and brand perception differences strictly from Korean VOC & reports. "
+                "Never put unescaped double quotes or newlines inside JSON string values; use single quotes only. Return valid RFC8259 JSON only."
             ),
             user_prompt=prompt,
-            max_tokens=5400,
+            max_tokens=6400,
         )
 
     async def _run_batch_consumer_trends_bench(

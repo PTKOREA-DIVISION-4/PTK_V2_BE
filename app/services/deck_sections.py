@@ -24,9 +24,10 @@ def clean_slide_text(text: str | None) -> str:
     """Remove markdown emphasis and perplexity citation brackets while keeping URLs and signs intact."""
     if not text:
         return ""
-    cleaned = text.replace("**", "").replace("__", "").replace("`", "")
+    cleaned = text.replace("\xa0", " ").replace("**", "").replace("__", "").replace("`", "")
     cleaned = re.sub(r"\[(\d{1,2})\](?=\s|$|[.,;:\)])", "", cleaned)
     cleaned = cleaned.replace("###", "").replace("##", "").replace("# ", "")
+    cleaned = re.sub(r"\.{2,}", "…", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
 
