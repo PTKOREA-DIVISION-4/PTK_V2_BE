@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pptx.dml.color import RGBColor
-from pptx.util import Inches
+from pptx.util import Inches, Pt
 
 
 SLIDE_WIDTH = Inches(13.333)
@@ -34,7 +34,20 @@ COLOR_SLATE_500 = COLOR_TEXT_MUTED
 COLOR_CARD_BG = COLOR_SURFACE
 COLOR_HEADCOPY_BG = COLOR_SURFACE
 
-FONT_FAMILY = "Apple SD Gothic Neo"
+FONT_FAMILY = "Pretendard"
+
+# Division 4 Official Typography Scale (16:9 PPTX pt <-> Web px parity)
+TYPO_DISPLAY = Pt(36)       # Cover & Section Divider title (Bold)
+TYPO_SECTION = Pt(22)       # Index part titles & Divider subtitle (SemiBold)
+TYPO_KPI_VALUE = Pt(20)     # KPI headline numeric figure (Bold/ExtraBold)
+TYPO_SLIDE_TITLE = Pt(18)   # Content slide title (Bold)
+TYPO_HEADCOPY = Pt(13)      # Key Message 1-sentence conclusion (SemiBold)
+TYPO_PANEL_TITLE = Pt(11.5) # Chart/Panel/Index row title (Bold)
+TYPO_BODY = Pt(10.5)        # Insight bullets & AS-IS/TO-BE text (Medium)
+TYPO_TABLE_HEADER = Pt(10)  # Table header cells (SemiBold)
+TYPO_TABLE_CELL = Pt(10)    # Table data cells & bottom observation strip (Regular)
+TYPO_LABEL = Pt(9.5)        # Badges, channel labels, KPI subtitles (SemiBold)
+TYPO_FOOTNOTE = Pt(9)       # Source footnotes, hyperlinks, page counter (Regular)
 
 SECTION_BADGE_LABELS: dict[str, str] = {
     "0_OVERVIEW": "0. 분석 개요",
