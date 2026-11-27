@@ -10,8 +10,26 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 
 
+def _register_pretendard_fonts() -> None:
+    font_dirs = [
+        Path.home() / "Library" / "Fonts",
+        Path("/Library/Fonts"),
+        Path("/usr/share/fonts"),
+    ]
+    for base in font_dirs:
+        if not base.exists():
+            continue
+        for ttf in base.glob("Pretendard-*.ttf"):
+            try:
+                fm.fontManager.addfont(str(ttf))
+            except Exception:
+                continue
+
+
 def _configure_korean_font() -> None:
+    _register_pretendard_fonts()
     preferred = [
+        "Pretendard",
         "AppleGothic",
         "Apple SD Gothic Neo",
         "Malgun Gothic",
