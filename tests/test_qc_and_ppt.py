@@ -300,3 +300,39 @@ async def test_qc_passes_and_pptx_renders_all_standard_sections(
             "TO-BE",
         ]:
             assert required_marker in all_texts
+
+        # Verify Pretendard font, >= 9pt minimum floor, and clickable hyperlinks
+        pretendard_runs = 0
+        sub_9pt_runs = 0
+        hyperlinks: list[str] = []
+        for s in prs.slides:
+            for sh in s.shapes:
+                frames = (
+                    [c.text_frame for r in sh.table.rows for c in r.cells]
+                    if sh.has_table
+                    else ([sh.text_frame] if sh.has_text_frame else [])
+                )
+                for tf in frames:
+                    for p in tf.paragraphs:
+                        pn = p.font.name if p.font else None
+                        ps = p.font.size.pt if (p.font and p.font.size) else None
+                        if pn == "Pretendard":
+                            pretendard_runs += 1
+                        if ps is not None and ps < 8.95:
+                            sub_9pt_runs += 1
+                        for r in p.runs:
+                            rn = (r.font.name if r.font else None) or pn
+                            rs = (r.font.size.pt if (r.font and r.font.size) else None) or ps
+                            if rn == "Pretendard":
+                                pretendard_runs += 1
+                            if rs is not None and rs < 8.95:
+                                sub_9pt_runs += 1
+                            try:
+                                if r.hyperlink and r.hyperlink.address:
+                                    hyperlinks.append(r.hyperlink.address)
+                            except Exception:
+                                pass
+
+        assert pretendard_runs > 50
+        assert sub_9pt_runs == 0
+        assert any(url.startswith("http") for url in hyperlinks)

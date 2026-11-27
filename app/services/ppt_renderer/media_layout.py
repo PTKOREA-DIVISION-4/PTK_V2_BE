@@ -10,6 +10,7 @@ from pptx.slide import Slide
 from pptx.util import Inches, Pt
 
 from app.services.deck_blueprint import clean_slide_text
+from app.services.ppt_renderer.channel_icons import normalize_channel_key, render_channel_icon
 from app.services.ppt_renderer.theme import (
     COLOR_BLACK,
     COLOR_BORDER,
@@ -20,6 +21,8 @@ from app.services.ppt_renderer.theme import (
     COLOR_TEXT_SUB,
     COLOR_WHITE,
     FONT_FAMILY,
+    TYPO_FOOTNOTE,
+    TYPO_LABEL,
 )
 
 
@@ -71,8 +74,9 @@ def render_sns_top5_grid(
     visual_assets: list[dict[str, Any]],
     top: float = 2.55,
     height: float = 3.25,
+    icon_dir: Path | None = None,
 ) -> None:
-    """Renders up to 5 horizontal reference cards in Division 4 Black + Orange style."""
+    """Renders up to 5 horizontal SNS cards with Pretendard >=9pt typography, channel icons, and links."""
     cards = visual_assets[:5]
     if not cards:
         return
@@ -101,22 +105,41 @@ def render_sns_top5_grid(
             Inches(left),
             Inches(top),
             Inches(card_w),
-            Inches(0.32),
+            Inches(0.34),
         )
         pill.fill.solid()
         pill.fill.fore_color.rgb = COLOR_ORANGE if idx == 0 else COLOR_BLACK
         pill.line.fill.background()
+
+        meta = card.get("metadata") or {}
+        ch_raw = str(meta.get("platform") or card.get("title") or "official")
+        ch_key = normalize_channel_key(ch_raw)
+        has_icon = False
+        if icon_dir is not None:
+            icon_path = render_channel_icon(ch_key, icon_dir, size_px=48)
+            if icon_path.exists():
+                slide.shapes.add_picture(
+                    str(icon_path),
+                    Inches(left + 0.06),
+                    Inches(top + 0.05),
+                    width=Inches(0.24),
+                    height=Inches(0.24),
+                )
+                has_icon = True
+
         tf = pill.text_frame
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        if has_icon:
+            tf.margin_left = Inches(0.34)
         p = tf.paragraphs[0]
-        p.text = str(card.get("title") or f"TOP {idx+1}")[:26]
+        p.text = str(card.get("title") or f"TOP {idx+1}")[:24]
         p.font.name = FONT_FAMILY
-        p.font.size = Pt(9.5)
+        p.font.size = TYPO_LABEL
         p.font.bold = True
         p.font.color.rgb = COLOR_WHITE
 
-        img_top = top + 0.38
-        img_h = max(1.3, height * 0.52)
+        img_top = top + 0.40
+        img_h = max(1.25, height * 0.48)
         placed = False
         lp = card.get("local_path")
         if lp:
@@ -144,31 +167,44 @@ def render_sns_top5_grid(
             pp = ptf.paragraphs[0]
             pp.text = "대표 이미지\n(썸네일 미제공)"
             pp.font.name = FONT_FAMILY
-            pp.font.size = Pt(8.5)
+            pp.font.size = TYPO_FOOTNOTE
             pp.font.color.rgb = COLOR_TEXT_MUTED
 
-        cap_top = img_top + img_h + 0.08
-        cap_h = max(0.6, (top + height) - cap_top - 0.06)
+        cap_top = img_top + img_h + 0.06
+        cap_h = max(0.65, (top + height) - cap_top - 0.06)
         cap_box = slide.shapes.add_textbox(
-            Inches(left + 0.1),
+            Inches(left + 0.08),
             Inches(cap_top),
-            Inches(card_w - 0.2),
+            Inches(card_w - 0.16),
             Inches(cap_h),
         )
         ctf = cap_box.text_frame
         ctf.word_wrap = True
         cp1 = ctf.paragraphs[0]
-        cp1.text = clean_slide_text(str(card.get("caption") or ""))[:58]
+        cp1.text = clean_slide_text(str(card.get("caption") or ""))[:52]
         cp1.font.name = FONT_FAMILY
-        cp1.font.size = Pt(8)
+        cp1.font.size = TYPO_FOOTNOTE
         cp1.font.bold = True
         cp1.font.color.rgb = COLOR_TEXT_MAIN
 
         ann = clean_slide_text(str(card.get("annotation_text") or ""))
         if ann:
             cp2 = ctf.add_paragraph()
-            cp2.space_before = Pt(3)
-            cp2.text = ann[:68]
+            cp2.space_before = Pt(2)
+            cp2.text = ann[:56]
             cp2.font.name = FONT_FAMILY
-            cp2.font.size = Pt(8)
+            cp2.font.size = TYPO_FOOTNOTE
             cp2.font.color.rgb = COLOR_TEXT_SUB
+
+        post_url = str(meta.get("post_url") or "").strip()
+        if post_url.startswith("http"):
+            cp3 = ctf.add_paragraph()
+            cp3.space_before = Pt(2)
+            run = cp3.add_run()
+            run.text = "원문 보기 ↗"
+            run.font.name = FONT_FAMILY
+            run.font.size = TYPO_FOOTNOTE
+            run.font.bold = True
+            run.font.color.rgb = COLOR_ORANGE
+            run.font.underline = True
+            run.hyperlink.address = post_url
