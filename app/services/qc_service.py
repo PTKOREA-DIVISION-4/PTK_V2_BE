@@ -65,6 +65,16 @@ class QcService:
                     message="0. 분석 개요 ~ 5. 현황 요약 및 결론 전체 표준 섹션이 모두 구성되었습니다.",
                 )
             )
+            if len(slides) >= 6 and not any(s.slide_type == "INDEX" for s in slides):
+                checks.append(
+                    QcCheckItem(
+                        gate_code="REQUIRED_SECTIONS",
+                        severity=QcSeverity.WARNING,
+                        message="목차(INDEX) 슬라이드가 누락되었습니다. 전체 장표 탐색을 위해 포함을 권장합니다.",
+                        target_section=SectionCode.OVERVIEW,
+                        user_action_hint="장표 초안을 다시 생성해 목차 슬라이드를 포함하세요.",
+                    )
+                )
 
         # Gate 2: No Empty Slides (every slide must have headcopy & concrete body content)
         empty_found = False

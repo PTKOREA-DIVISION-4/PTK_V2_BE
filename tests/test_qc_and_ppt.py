@@ -207,6 +207,20 @@ async def test_qc_passes_and_pptx_renders_all_standard_sections(
         )
 
         session.add(
+            RawSourceItem(
+                project_id=proj.id,
+                section_code=SectionCode.OWN.value,
+                provider="APIFY",
+                channel="news_press",
+                title="설화수 윤조에센스 글로벌 캠페인 공개",
+                content="설화수가 윤조에센스 6세대 글로벌 캠페인을 통해 고객 접점을 확대했습니다.",
+                source_url="https://news.example.com/sulwhasoo-campaign-full-url-parameter-preserved",
+                evidence_quote="설화수가 윤조에센스 6세대 글로벌 캠페인을 공개했습니다.",
+                review_status="APPROVED",
+                metadata_json={"published_date_raw": "2026-10-12", "brand_name": "설화수", "topic_tag": "신제품 출시"},
+            )
+        )
+        session.add(
             SnsTopPost(
                 project_id=proj.id,
                 owner_type="OWN",
@@ -230,7 +244,22 @@ async def test_qc_passes_and_pptx_renders_all_standard_sections(
         slides = await LlmStructuringService(session).generate_slides(
             proj.id, summary_split_mode=SummarySplitMode.SPLIT_2
         )
-        assert len(slides) >= 9  # 0 + 1(2) + 2 + 3(2) + 4 + 5(2 summary + 1 conclusion)
+        assert len(slides) >= 35  # 36~40+ high-density slides with INDEX & PART 1~5 dividers
+        slide_types = [s.slide_type for s in slides]
+        assert slide_types[0] == "INDEX"
+        assert slide_types.count("SECTION_DIVIDER") == 5
+        assert "OWN_INSTAGRAM_TOP5" in slide_types
+        assert "OWN_YOUTUBE_TOP5" in slide_types
+        assert "OWN_PRESS_ANALYSIS" in slide_types
+        assert "COMPETITOR_DETAIL" in slide_types
+        assert "COMPETITOR_MARKETING_6" in slide_types
+
+        # Appendix source URLs must remain un-truncated for valid clickable hyperlinks
+        appendix = next(s for s in slides if s.slide_type == "APPENDIX_SOURCES")
+        assert any(
+            "https://news.example.com/sulwhasoo-campaign-full-url-parameter-preserved" in row[3]
+            for row in (appendix.table_json or {}).get("rows", [])
+        )
 
         qc = await QcService(session).evaluate_project(proj.id)
         assert qc.can_export is True
