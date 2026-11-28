@@ -54,9 +54,14 @@ def evaluate(pid: str, pptx_path: Path, api_base: str = API) -> dict:
         s1 -= pen
         deductions.append(f"[Structure] Body slides {len(slides)} < 35 high-density target (-{pen})")
 
-    if not slides or slides[0].get("slide_type") != "INDEX":
+    has_cover = bool(slides and slides[0].get("slide_type") == "COVER")
+    has_index = any(s.get("slide_type") == "INDEX" for s in slides[:2])
+    if not has_cover:
+        s1 -= 1.0
+        deductions.append("[Structure] Missing COVER slide at slide_order=1 (-1.0)")
+    if not has_index:
         s1 -= 2.0
-        deductions.append("[Structure] Missing INDEX slide at slide_order=1 (-2.0)")
+        deductions.append("[Structure] Missing INDEX slide (-2.0)")
 
     divider_cnt = sum(1 for s in slides if s.get("slide_type") == "SECTION_DIVIDER")
     if divider_cnt < 5:
@@ -209,7 +214,7 @@ def evaluate(pid: str, pptx_path: Path, api_base: str = API) -> dict:
     if not a2b or not a2b.get("as_is_to_be") or any(len(a2b["as_is_to_be"].get(k, [])) < 3 for k in ("as_is_points", "key_issues", "to_be_directions")):
         s5 -= 2.0
         deductions.append("[Alignment] CONCLUSION_ASIS_TOBE incomplete (-2.0)")
-    body_slides = [s for s in slides if s.get("slide_type") not in {"INDEX", "SECTION_DIVIDER"}]
+    body_slides = [s for s in slides if s.get("slide_type") not in {"COVER", "INDEX", "SECTION_DIVIDER"}]
     visual_ratio = sum(
         1 for s in body_slides if s.get("visual_assets") or s.get("table") or s.get("as_is_to_be")
     ) / max(1, len(body_slides))

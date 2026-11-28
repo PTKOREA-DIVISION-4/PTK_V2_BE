@@ -94,7 +94,14 @@ class SlideBuilder:
         self.icon_dir = self.work_dir / "icons"
         self.icon_dir.mkdir(parents=True, exist_ok=True)
 
-    def add_cover_slide(self, prs: Presentation, project: Project, total_body_slides: int) -> None:
+    def add_cover_slide(
+        self,
+        prs: Presentation,
+        project: Project,
+        total_body_slides: int,
+        *,
+        draft: SlideDraft | None = None,
+    ) -> None:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), SLIDE_WIDTH, SLIDE_HEIGHT)
         bg.fill.solid()
@@ -122,9 +129,16 @@ class SlideBuilder:
         p0.font.bold = True
         p0.font.color.rgb = COLOR_ORANGE
 
+        cover_title = clean_slide_text(draft.title) if draft and draft.title else project.name
+        cover_sub = (
+            clean_slide_text(draft.headcopy)
+            if draft and draft.headcopy
+            else f"단일 분석 타겟: {project.brand_name} — {project.product_name}"
+        )
+
         p1 = tf.add_paragraph()
         p1.space_before = Pt(16)
-        p1.text = project.name[:90]
+        p1.text = cover_title[:90]
         p1.font.name = FONT_FAMILY
         p1.font.size = TYPO_DISPLAY
         p1.font.bold = True
@@ -132,7 +146,7 @@ class SlideBuilder:
 
         p2 = tf.add_paragraph()
         p2.space_before = Pt(18)
-        p2.text = f"단일 분석 타겟: {project.brand_name} — {project.product_name}"
+        p2.text = cover_sub[:120]
         p2.font.name = FONT_FAMILY
         p2.font.size = Pt(17)
         p2.font.color.rgb = COLOR_WHITE
@@ -144,7 +158,7 @@ class SlideBuilder:
             if project.analysis_track == "REVIEW_CENTRIC"
             else "시장·검색 지표 중심(Track B)"
         )
-        p3.text = f"수집 기간: {project.period_start} ~ {project.period_end}  |  트랙: {track_txt}  |  본문 {total_body_slides}장 구성"
+        p3.text = f"수집 기간: {project.period_start} ~ {project.period_end}  |  트랙: {track_txt}  |  총 {total_body_slides + 1}장 구성"
         p3.font.name = FONT_FAMILY
         p3.font.size = Pt(12)
         p3.font.color.rgb = COLOR_TEXT_MUTED
@@ -157,7 +171,16 @@ class SlideBuilder:
         datalab_series: list[DataLabSeries],
         slide_number: int,
         total_slides: int = 0,
+        project: Project | None = None,
     ) -> None:
+        if draft.slide_type == "COVER" and project is not None:
+            self.add_cover_slide(
+                prs,
+                project,
+                total_body_slides=max(0, total_slides - 1),
+                draft=draft,
+            )
+            return
         if draft.slide_type == "SECTION_DIVIDER":
             self._build_section_divider_slide(prs, draft, slide_number=slide_number, total_slides=total_slides)
             return
@@ -319,20 +342,85 @@ class SlideBuilder:
     def _build_index_slide(
         self, prs: Presentation, draft: SlideDraft, *, slide_number: int, total_slides: int
     ) -> None:
+        """Minimal 2-column editorial INDEX layout synchronized with Web Studio."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
-        self._draw_chrome(slide, draft, slide_number, total_slides)
-        self._draw_headcopy(slide, draft.headcopy)
+        top_edge = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), SLIDE_WIDTH, Inches(0.03))
+        top_edge.fill.solid()
+        top_edge.fill.fore_color.rgb = COLOR_ORANGE
+        top_edge.line.fill.background()
 
-        body_top = 1.54
-        if draft.kpi_cards_json:
-            self._draw_kpi_strip(slide, list(draft.kpi_cards_json), top=1.52, height=0.82)
-            body_top = 2.46
+        # Left minimal anchor column
+        left_box = slide.shapes.add_textbox(Inches(0.65), Inches(0.75), Inches(3.2), Inches(2.6))
+        ltf = left_box.text_frame
+        ltf.word_wrap = True
+        p_idx = ltf.paragraphs[0]
+        p_idx.text = "INDEX"
+        p_idx.font.name = FONT_FAMILY
+        p_idx.font.size = Pt(38)
+        p_idx.font.bold = True
+        p_idx.font.color.rgb = COLOR_BLACK
 
-        if draft.table_json:
-            self._draw_table(slide, draft.table_json, left=0.55, top=body_top, width=12.23, height=3.45)
+        bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.68), Inches(1.52), Inches(0.55), Inches(0.05))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = COLOR_ORANGE
+        bar.line.fill.background()
 
-        if draft.bullets_json:
-            self._draw_bottom_insight_strip(slide, list(draft.bullets_json), top=6.00, height=0.88)
+        sub_box = slide.shapes.add_textbox(Inches(0.65), Inches(1.78), Inches(3.2), Inches(1.4))
+        stf = sub_box.text_frame
+        stf.word_wrap = True
+        sp1 = stf.paragraphs[0]
+        sp1.text = clean_slide_text(draft.headcopy or f"총 {total_slides}페이지 구성")[:80]
+        sp1.font.name = FONT_FAMILY
+        sp1.font.size = Pt(12)
+        sp1.font.bold = True
+        sp1.font.color.rgb = COLOR_TEXT_SUB
+
+        sp2 = stf.add_paragraph()
+        sp2.space_before = Pt(6)
+        sp2.text = f"{slide_number:02d} / {total_slides:02d}" if total_slides else "02"
+        sp2.font.name = FONT_FAMILY
+        sp2.font.size = TYPO_FOOTNOTE
+        sp2.font.color.rgb = COLOR_TEXT_MUTED
+
+        # Right clean list rows (horizontal hairline dividers only)
+        rows = list((draft.table_json or {}).get("rows") or [])[:6]
+        start_y = 0.85
+        row_h = 0.92
+        for idx, row in enumerate(rows):
+            ry = start_y + idx * row_h
+            part_code = str(row[0] if len(row) > 0 else f"PART {idx}").replace("PART ", "").zfill(2)
+            part_title = str(row[1] if len(row) > 1 else "")
+            cnt_txt = str(row[2] if len(row) > 2 else "")
+            page_txt = str(row[3] if len(row) > 3 else "")
+
+            num_tb = slide.shapes.add_textbox(Inches(4.30), Inches(ry + 0.14), Inches(0.70), Inches(0.45))
+            np = num_tb.text_frame.paragraphs[0]
+            np.text = part_code
+            np.font.name = FONT_FAMILY
+            np.font.size = Pt(15)
+            np.font.bold = True
+            np.font.color.rgb = COLOR_ORANGE
+
+            title_tb = slide.shapes.add_textbox(Inches(5.05), Inches(ry + 0.14), Inches(5.35), Inches(0.45))
+            tp = title_tb.text_frame.paragraphs[0]
+            tp.text = smart_truncate(part_title, 44)
+            tp.font.name = FONT_FAMILY
+            tp.font.size = Pt(14)
+            tp.font.bold = True
+            tp.font.color.rgb = COLOR_TEXT_MAIN
+
+            meta_tb = slide.shapes.add_textbox(Inches(10.45), Inches(ry + 0.14), Inches(2.25), Inches(0.45))
+            mp = meta_tb.text_frame.paragraphs[0]
+            mp.text = f"{page_txt}  ({cnt_txt})" if cnt_txt else page_txt
+            mp.font.name = FONT_FAMILY
+            mp.font.size = Pt(11)
+            mp.font.bold = True
+            mp.font.color.rgb = COLOR_TEXT_SUB
+
+            line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(4.30), Inches(ry + row_h - 0.08), Inches(8.40), Inches(0.015))
+            line.fill.solid()
+            line.fill.fore_color.rgb = COLOR_BORDER
+            line.line.fill.background()
 
         self._draw_footnote(slide, draft.footnote or "")
 

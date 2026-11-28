@@ -244,9 +244,13 @@ async def test_qc_passes_and_pptx_renders_all_standard_sections(
         slides = await LlmStructuringService(session).generate_slides(
             proj.id, summary_split_mode=SummarySplitMode.SPLIT_2
         )
-        assert len(slides) >= 35  # 36~40+ high-density slides with INDEX & PART 1~5 dividers
+        assert len(slides) >= 36  # 37~41+ high-density slides with COVER, INDEX & PART 1~5 dividers
         slide_types = [s.slide_type for s in slides]
-        assert slide_types[0] == "INDEX"
+        assert slide_types[0] == "COVER"
+        assert slide_types[1] == "INDEX"
+        assert slides[1].kpi_cards_json == []
+        assert slides[1].bullets_json == []
+        assert len((slides[1].table_json or {}).get("rows", [])) == 6
         assert slide_types.count("SECTION_DIVIDER") == 5
         assert "OWN_INSTAGRAM_TOP5" in slide_types
         assert "OWN_YOUTUBE_TOP5" in slide_types
@@ -278,11 +282,11 @@ async def test_qc_passes_and_pptx_renders_all_standard_sections(
         rendered = PPTXRenderer().render(
             project=proj, slides=slides, datalab_series=dl_entities, output_path=out_pptx
         )
-        assert rendered == len(slides) + 1  # cover + body slides
+        assert rendered == len(slides)  # COVER is already slide[0] in slides
         assert out_pptx.exists()
 
         prs = Presentation(str(out_pptx))
-        assert len(prs.slides) == len(slides) + 1
+        assert len(prs.slides) == len(slides)
         all_texts = "\n".join(
             shape.text
             for s in prs.slides

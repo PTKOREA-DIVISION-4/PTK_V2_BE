@@ -84,19 +84,55 @@ def build_deterministic_deck(
     slides: list[SlideDraft] = []
     order = 1
 
-    # ── 0. INDEX (populated dynamically after all slides assemble) ─────────────
+    # ── 0-0. COVER (앞장 표지) ──────────────────────────────────────────────
+    slides.append(
+        SlideDraft(
+            project_id=project.id,
+            section_code=SectionCode.OVERVIEW.value,
+            slide_order=order,
+            slide_type="COVER",
+            title=project.name[:90],
+            headcopy=f"단일 분석 타겟: {project.brand_name} — {project.product_name}",
+            kpi_cards_json=[
+                {
+                    "label": "단일 분석 타겟",
+                    "value": f"{project.brand_name} · {project.product_name}",
+                    "delta": project.industry_category,
+                    "basis": "Single-Brand Scope",
+                },
+                {
+                    "label": "수집·분석 기간",
+                    "value": f"{project.period_start} ~ {project.period_end}",
+                    "delta": f"경쟁 {len(project.competitors)}종",
+                    "basis": "정량 시계열 · 실증 원천",
+                },
+                {
+                    "label": "분석 트랙",
+                    "value": "Track A (후기·실사용)" if project.analysis_track == "REVIEW_CENTRIC" else "Track B (시장·검색)",
+                    "delta": track_label,
+                    "basis": "Division 4 Factbook",
+                },
+            ],
+            table_json=None,
+            bullets_json=[],
+            footnote=f"DIVISION 4 · FACTBOOK REPORT | {project.industry_category}",
+        )
+    )
+    order += 1
+
+    # ── 0-1. INDEX (populated dynamically after all slides assemble) ──────────
     slides.append(
         SlideDraft(
             project_id=project.id,
             section_code=SectionCode.OVERVIEW.value,
             slide_order=order,
             slide_type="INDEX",
-            title="INDEX. 목차 및 팩트북 전체 구성",
-            headcopy=f"{project.brand_name} '{project.product_name}' 팩트북 목차 및 파트별 페이지 구성",
+            title="INDEX",
+            headcopy=f"{project.brand_name} {project.product_name} 팩트북 목차",
             kpi_cards_json=[],
-            table_json={"headers": ["구분", "핵심 분석 영역", "장표 수", "페이지"], "rows": []},
+            table_json={"headers": ["PART", "핵심 분석 영역", "장표 수", "페이지"], "rows": []},
             bullets_json=[],
-            footnote=f"조사 기준: {project.brand_name} {project.product_name} | 기간: {project.period_start}~{project.period_end}",
+            footnote=f"{project.brand_name} · {project.product_name} ({project.period_start} ~ {project.period_end})",
         )
     )
     order += 1

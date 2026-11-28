@@ -11,12 +11,12 @@ from app.schemas.common import SectionCode, SummarySplitMode
 from app.services.press_metrics_service import PressMetricsService
 
 PART_LABELS: dict[str, tuple[str, str]] = {
-    SectionCode.OVERVIEW.value: ("PART 0", "분석 개요 및 인덱스"),
-    SectionCode.OWN.value: ("PART 1", "자사 분석 (브랜드·제품·SNS·언론보도)"),
-    SectionCode.MARKET.value: ("PART 2", "시장 분석 (규모·수요 추이·유통·플레이어)"),
-    SectionCode.COMPETITOR.value: ("PART 3", "경쟁사 분석 (1:1 심층·PR·마케팅 6분류)"),
-    SectionCode.CONSUMER.value: ("PART 4", "소비자 분석 및 트렌드·벤치마크"),
-    SectionCode.SUMMARY_CONCLUSION.value: ("PART 5", "종합 요약·AS-IS→TO-BE·출처 부록"),
+    SectionCode.OVERVIEW.value: ("PART 0", "분석 개요"),
+    SectionCode.OWN.value: ("PART 1", "자사 분석 (제품·SNS·언론보도)"),
+    SectionCode.MARKET.value: ("PART 2", "시장 분석 (규모·수요·플레이어)"),
+    SectionCode.COMPETITOR.value: ("PART 3", "경쟁사 분석 (1:1 심층·PR·마케팅)"),
+    SectionCode.CONSUMER.value: ("PART 4", "소비자 분석 · 트렌드 · 벤치마크"),
+    SectionCode.SUMMARY_CONCLUSION.value: ("PART 5", "종합 요약 · 전략 방향 · 출처"),
 }
 
 
@@ -150,7 +150,7 @@ def make_section_divider(
 
 
 def recompute_index_slide(deck: list[SlideDraft]) -> None:
-    """Update slide_order sequentially (1..N) and populate INDEX table/KPIs with exact PDF page ranges."""
+    """Update slide_order sequentially (1..N) and populate concise INDEX table with exact page ranges."""
     for idx, slide in enumerate(deck, start=1):
         slide.slide_order = idx
 
@@ -158,12 +158,14 @@ def recompute_index_slide(deck: list[SlideDraft]) -> None:
     if index_slide is None:
         return
 
-    # PDF page mapping: Cover is p.1, body slides start at p.2
+    has_cover = any(s.slide_type == "COVER" for s in deck)
+    page_offset = 0 if has_cover else 1
+
     ranges: dict[str, tuple[int, int, int, list[str]]] = {}
     for s in deck:
-        if s.slide_type == "INDEX":
+        if s.slide_type in {"COVER", "INDEX"}:
             continue
-        pdf_page = s.slide_order + 1
+        pdf_page = s.slide_order + page_offset
         sec = s.section_code
         if sec not in ranges:
             ranges[sec] = (pdf_page, pdf_page, 1, [s.title])
@@ -174,47 +176,24 @@ def recompute_index_slide(deck: list[SlideDraft]) -> None:
             ranges[sec] = (start_p, pdf_page, cnt + 1, titles)
 
     rows: list[list[str]] = []
-    bullets: list[dict[str, Any]] = []
     for sec_enum in SectionCode:
         sec_code = sec_enum.value
         if sec_code not in ranges:
             continue
         part_tag, part_desc = PART_LABELS[sec_code]
-        start_p, end_p, cnt, titles = ranges[sec_code]
+        start_p, end_p, cnt, _ = ranges[sec_code]
         page_str = f"p.{start_p}" if start_p == end_p else f"p.{start_p} ~ p.{end_p}"
-        key_topics = " · ".join(
-            clean_slide_text(re.sub(r"^\d+(?:-\d+)?\.\s*|^PART\s*\d+\s*·\s*", "", t))[:24]
-            for t in titles[:2]
-        )
         rows.append([part_tag, part_desc, f"{cnt}장", page_str])
-        if len(bullets) < 4:
-            bullets.append(
-                {
-                    "claim": f"{part_tag} ({page_str}, {cnt}장): {key_topics or part_desc}",
-                    "evidence_quote": None,
-                    "source_name": part_desc[:28],
-                    "source_url": None,
-                    "fact_id": None,
-                }
-            )
 
-    total_pdf_pages = len(deck) + 1
-    index_slide.headcopy = (
-        f"표지 포함 총 {total_pdf_pages}페이지(본문 {len(deck)}장) 구성 — "
-        "자사·시장·경쟁·소비자 실증 팩트 및 전략 제언 목차"
-    )
-    index_slide.kpi_cards_json = [
-        {"label": "전체 분량", "value": f"{total_pdf_pages}p", "delta": f"본문 {len(deck)}장", "basis": "표지+목차 포함"},
-        {"label": "분석 파트", "value": f"{len(rows)}개 파트", "delta": "구분선 5장 포함", "basis": "0~5 표준 섹션"},
-        {"label": "수집·검증 범위", "value": "3C+C 실증", "delta": "1:1 경쟁·PR 포함", "basis": "다중 API 연동"},
-        {"label": "품질 기준", "value": "Hallucination 0", "delta": "출처 URL 연결", "basis": "Division 4 QC"},
-    ]
+    total_pdf_pages = len(deck) + page_offset
+    index_slide.title = "INDEX"
+    index_slide.headcopy = f"총 {total_pdf_pages}페이지 구성"
+    index_slide.kpi_cards_json = []
     index_slide.table_json = {
-        "headers": ["구분", "핵심 분석 영역", "장표 수", "페이지"],
+        "headers": ["PART", "핵심 분석 영역", "장표 수", "페이지"],
         "rows": rows,
     }
-    if bullets:
-        index_slide.bullets_json = bullets
+    index_slide.bullets_json = []
 
 
 def attach_verified_source_urls(
@@ -262,7 +241,7 @@ def attach_verified_source_urls(
                 fact_url_by_id[str(fid)] = str(b["source_url"]).strip()
 
     for s in slides:
-        if s.slide_type in {"INDEX", "SECTION_DIVIDER", "DATA_GAP"}:
+        if s.slide_type in {"COVER", "INDEX", "SECTION_DIVIDER", "DATA_GAP"}:
             continue
         sec_pool = urls_by_section.get(s.section_code) or all_valid_urls
         new_bullets: list[dict[str, Any]] = []
