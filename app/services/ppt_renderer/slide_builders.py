@@ -197,15 +197,18 @@ class SlideBuilder:
         sns_types = {"OWN_SNS_TOP5", "OWN_INSTAGRAM_TOP5", "OWN_YOUTUBE_TOP5", "COMPETITOR_SNS_TOP5"}
         is_sns_top5 = draft.slide_type in sns_types and bool(draft.visual_assets_json)
         is_asis_tobe = draft.slide_type == "CONCLUSION_ASIS_TOBE" and bool(draft.as_is_to_be_json)
-        has_chart_or_table = bool(draft.table_json) or bool(draft.visual_assets_json)
-
+        has_table = bool(draft.table_json)
+        has_visual = bool(draft.visual_assets_json)
+        is_table_only_with_bullets = (
+            has_table and not has_visual and not is_sns_top5 and not is_asis_tobe and bool(bullets)
+        )
         body_top = 1.56
         if kpis:
             self._draw_kpi_strip(slide, kpis, top=1.52, height=0.82)
             body_top = 2.44
 
-        show_insight_strip = bool(bullets) and (has_chart_or_table or is_sns_top5)
-        body_bottom = 5.76 if show_insight_strip else 6.80
+        show_insight_strip = bool(bullets) and (has_visual or is_sns_top5) and not is_table_only_with_bullets
+        body_bottom = 5.64 if show_insight_strip else 6.80
         body_height = max(2.2, body_bottom - body_top)
 
         if is_sns_top5:
@@ -218,7 +221,11 @@ class SlideBuilder:
             )
         elif is_asis_tobe:
             self._draw_asis_tobe(slide, draft.as_is_to_be_json or {}, top=body_top, height=6.80 - body_top)
-        elif has_chart_or_table:
+        elif is_table_only_with_bullets and draft.table_json:
+            # 표 단독 + 불릿 슬라이드는 좌측 표 / 우측 인사이트 2단 배치로 여백과 문장 잘림을 모두 해소
+            self._draw_table(slide, draft.table_json, left=0.55, top=body_top, width=7.55, height=body_height)
+            self._draw_bullets_panel(slide, bullets, left=8.28, top=body_top, width=4.50, height=body_height)
+        elif has_table or has_visual:
             self._draw_visual_and_table_body(
                 slide,
                 draft,
@@ -232,7 +239,7 @@ class SlideBuilder:
             )
 
         if show_insight_strip and not is_asis_tobe:
-            self._draw_bottom_insight_strip(slide, bullets, top=5.84, height=0.98)
+            self._draw_bottom_insight_strip(slide, bullets, top=5.72, height=1.12)
 
         self._draw_footnote(slide, draft.footnote or "")
 
@@ -801,7 +808,7 @@ class SlideBuilder:
             tf = box.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
-            claim = smart_truncate(str(b.get("claim") or ""), 78)
+            claim = smart_truncate(str(b.get("claim") or ""), 115)
             p.text = f"{idx + 1}. {claim}"
             p.font.name = FONT_FAMILY
             p.font.size = TYPO_FOOTNOTE

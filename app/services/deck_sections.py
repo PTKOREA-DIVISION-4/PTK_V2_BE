@@ -240,15 +240,50 @@ def attach_verified_source_urls(
             if fid and b.get("source_url") and str(b.get("source_url")).startswith("http"):
                 fact_url_by_id[str(fid)] = str(b["source_url"]).strip()
 
+    non_link_tokens = (
+        "데이터랩",
+        "datalab",
+        "조사 설계",
+        "조사 계획",
+        "qc",
+        "팩트북",
+        "입력값",
+        "확인 못 함",
+        "결과 없음",
+        "pressmetrics",
+    )
+    research_urls_by_section: dict[str, list[str]] = {}
+    for src in sources:
+        if src.channel in {"perplexity_research", "news_press"}:
+            candidates = []
+            if src.source_url and src.source_url.startswith("http"):
+                candidates.append(src.source_url.strip())
+            meta = src.metadata_json or {}
+            if isinstance(meta, dict):
+                for cit in meta.get("citations") or []:
+                    c_str = str(cit).strip()
+                    if c_str.startswith("http"):
+                        candidates.append(c_str)
+            for u in candidates:
+                r_list = research_urls_by_section.setdefault(src.section_code, [])
+                if u not in r_list:
+                    r_list.append(u)
+
     for s in slides:
         if s.slide_type in {"COVER", "INDEX", "SECTION_DIVIDER", "DATA_GAP"}:
             continue
-        sec_pool = urls_by_section.get(s.section_code) or all_valid_urls
+        r_pool = research_urls_by_section.get(s.section_code) or []
         new_bullets: list[dict[str, Any]] = []
         for idx, b in enumerate(s.bullets_json or []):
             nb = dict(b)
+            src_name = str(nb.get("source_name") or "").lower()
+            is_non_link_source = any(tok in src_name for tok in non_link_tokens)
             existing_url = str(nb.get("source_url") or "").strip()
-            if existing_url.startswith("http"):
+            if existing_url.startswith("http") and not is_non_link_source:
+                new_bullets.append(nb)
+                continue
+            if is_non_link_source:
+                nb["source_url"] = None
                 new_bullets.append(nb)
                 continue
             fid = nb.get("fact_id")
@@ -256,16 +291,14 @@ def attach_verified_source_urls(
                 nb["source_url"] = fact_url_by_id[str(fid)]
                 new_bullets.append(nb)
                 continue
-            src_name = str(nb.get("source_name") or "").lower()
             matched_url: str | None = None
             for (sec, ch), u in url_by_channel_sec.items():
-                if sec == s.section_code and (ch in src_name or src_name in ch):
+                if sec == s.section_code and src_name and (ch in src_name or src_name in ch):
                     matched_url = u
                     break
-            if not matched_url and sec_pool:
-                matched_url = sec_pool[idx % len(sec_pool)]
-            if matched_url:
-                nb["source_url"] = matched_url
+            if not matched_url and r_pool and any(k in src_name for k in ("perplexity", "리서치", "보도", "뉴스", "기사")):
+                matched_url = r_pool[idx % len(r_pool)]
+            nb["source_url"] = matched_url
             new_bullets.append(nb)
         if new_bullets:
             s.bullets_json = new_bullets

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any
 
 from app.core.config import get_settings
@@ -218,7 +219,7 @@ class ScrapeCreatorsClient(BaseApiClient):
         if published_at is None and isinstance(node.get("publishedTimeText"), str):
             published_at = _parse_relative_time_text(node["publishedTimeText"])
 
-        # Extract Instagram GraphQL caption if nested
+        # Extract Instagram GraphQL caption if nested, or enrich YouTube title + description
         caption = node.get("caption") or node.get("title") or node.get("desc") or ""
         if isinstance(caption, dict):
             caption = caption.get("text") or ""
@@ -227,10 +228,24 @@ class ScrapeCreatorsClient(BaseApiClient):
             if edges and isinstance(edges[0], dict):
                 caption = ((edges[0].get("node") or {}).get("text")) or ""
 
+        if platform.upper() == "YOUTUBE":
+            yt_desc = node.get("description") or node.get("descriptionSnippet") or ""
+            if isinstance(yt_desc, dict):
+                yt_desc = yt_desc.get("simpleText") or ""
+            if isinstance(yt_desc, list):
+                yt_desc = " ".join(str(x.get("text") or "") for x in yt_desc if isinstance(x, dict))
+            yt_desc_str = str(yt_desc).strip()
+            if yt_desc_str and yt_desc_str not in str(caption):
+                caption = f"{caption} — {yt_desc_str}" if caption else yt_desc_str
+
         shortcode = node.get("shortcode")
         post_url = node.get("url") or node.get("permalink") or node.get("link") or ""
         if not post_url and shortcode and platform.upper() == "INSTAGRAM":
             post_url = f"https://www.instagram.com/p/{shortcode}/"
+        if not post_url and platform.upper() == "YOUTUBE":
+            raw_vid = str(node.get("videoId") or node.get("id") or "").strip()
+            if raw_vid and len(raw_vid) >= 6:
+                post_url = f"https://www.youtube.com/watch?v={raw_vid}"
 
         views = (
             node.get("video_play_count")
@@ -263,6 +278,7 @@ class ScrapeCreatorsClient(BaseApiClient):
             or node.get("display_url")
             or node.get("thumbnail_src")
             or node.get("thumbnail")
+            or node.get("thumbnails")
             or node.get("cover")
             or ""
         )
@@ -273,6 +289,15 @@ class ScrapeCreatorsClient(BaseApiClient):
             thumb = first_t.get("url", "") if isinstance(first_t, dict) else str(first_t)
         else:
             thumb = str(raw_thumb or "")
+
+        if not thumb and platform.upper() == "YOUTUBE":
+            vid = str(node.get("videoId") or node.get("id") or "").strip()
+            if not vid and post_url:
+                m = re.search(r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{6,})", str(post_url))
+                if m:
+                    vid = m.group(1)
+            if vid:
+                thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
 
         coauthors = node.get("coauthor_producers") or []
         is_collab = bool(
