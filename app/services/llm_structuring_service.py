@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError
+from app.core.job_manager import JobContext
 from app.integrations.anthropic_client import AnthropicClient
 from app.models.collection import RawSourceItem
 from app.models.factbook import FactItem, PlannerComment, SlideDraft
@@ -22,10 +25,21 @@ from app.services.deck_blueprint import (
     build_deterministic_deck,
     build_section5_slides,
     clean_slide_text,
+    sanitize_slide_draft,
 )
-from app.services.deck_synthesizer import DeckSynthesizer
+from app.services.deck_synthesizer import (
+    SYNTHESIS_BATCH_SPECS,
+    DeckSynthesizer,
+    clone_slide_draft,
+)
 
 logger = logging.getLogger(__name__)
+
+SLIDE_GENERATION_SUBTASKS: list[tuple[str, str]] = [
+    ("classify_facts", "승인 자료 분류 및 핵심 팩트 구조화"),
+    ("init_blueprint", "표지·목차 및 전체 장표 골격 생성"),
+    *SYNTHESIS_BATCH_SPECS,
+]
 
 
 class LlmStructuringService:
@@ -121,6 +135,194 @@ class LlmStructuringService:
         project.current_stage = ProjectStage.REVIEW.value
         await self.session.commit()
         return await self.slide_repo.list_by_project(project_id)
+
+    async def generate_slides_with_progress(
+        self,
+        project_id: str,
+        ctx: JobContext,
+        *,
+        summary_split_mode: SummarySplitMode | None = None,
+        use_approved_only: bool = True,
+    ) -> None:
+        """Run slide synthesis in background while streaming incremental SlideDraft snapshots to DB."""
+        db_write_lock = asyncio.Lock()
+
+        async def _save_snapshot(snapshot: list[SlideDraft]) -> None:
+            async with db_write_lock:
+                async with ctx.session_factory() as s:
+                    await SlideDraftRepository(s).replace_all_slides(
+                        project_id,
+                        [sanitize_slide_draft(clone_slide_draft(sl)) for sl in snapshot],
+                    )
+                    await s.commit()
+
+        await ctx.update_subtask(
+            "classify_facts",
+            status="RUNNING",
+            progress_pct=15,
+            log_message="승인 자료 로드 및 팩트 구조화 중",
+        )
+
+        async with ctx.session_factory() as s:
+            stmt = (
+                select(Project)
+                .options(
+                    selectinload(Project.competitors),
+                    selectinload(Project.sns_accounts),
+                    selectinload(Project.keyword_groups),
+                )
+                .where(Project.id == project_id)
+            )
+            project = (await s.execute(stmt)).scalar_one_or_none()
+            if not project:
+                raise NotFoundError(f"프로젝트({project_id})를 찾을 수 없습니다.")
+            if summary_split_mode is not None:
+                project.summary_split_mode = summary_split_mode.value
+                await s.commit()
+            split_mode = SummarySplitMode(project.summary_split_mode)
+            src_repo = SourceItemRepository(s)
+            sources = await src_repo.list_for_synthesis(project_id, use_approved_only=use_approved_only)
+            datalab_series = await src_repo.list_datalab(project_id)
+            sns_posts = await src_repo.list_sns_top_posts(project_id)
+            media_assets = await src_repo.list_media_assets(project_id)
+
+        relevant_sources = sources
+        tag_by_source_id: dict[str, str] = {}
+        if self.claude.is_configured() and sources:
+            try:
+                relevant_sources, tag_by_source_id = await self._classify_and_filter_sources(
+                    project, sources
+                )
+            except Exception as exc:
+                logger.warning("Claude source classification failed, keeping all sources: %s", exc)
+                relevant_sources = sources
+
+        facts = self._build_fact_items(project, relevant_sources, tag_by_source_id)
+        async with db_write_lock:
+            async with ctx.session_factory() as s:
+                await FactItemRepository(s).replace_for_project(project_id, facts)
+                await s.commit()
+
+        await ctx.update_subtask(
+            "classify_facts",
+            status="COMPLETED",
+            progress_pct=100,
+            collected_count=len(facts),
+            log_message=f"승인 자료 {len(relevant_sources)}건 → 팩트 {len(facts)}건 구조화 완료",
+        )
+
+        await ctx.update_subtask(
+            "init_blueprint",
+            status="RUNNING",
+            progress_pct=20,
+            log_message="표지(COVER)·목차(INDEX) 및 전체 장표 골격 생성 중",
+        )
+
+        if self.claude.is_configured() and relevant_sources:
+            async def _on_blueprint(snapshot: list[SlideDraft]) -> None:
+                await _save_snapshot(snapshot)
+                await ctx.update_subtask(
+                    "init_blueprint",
+                    status="COMPLETED",
+                    progress_pct=100,
+                    collected_count=len(snapshot),
+                    log_message=f"표지·목차 포함 {len(snapshot)}장 골격 생성 완료 (AI 8배치 실시간 합성 시작)",
+                )
+
+            async def _on_batch_start(key: str, label: str) -> None:
+                await ctx.update_subtask(
+                    key,
+                    status="RUNNING",
+                    progress_pct=30,
+                    log_message=f"{label} 진행 중",
+                )
+
+            async def _on_batch_complete(
+                key: str, label: str, snapshot: list[SlideDraft], err: Exception | None
+            ) -> None:
+                await _save_snapshot(snapshot)
+                msg = (
+                    f"{label} 완료 (총 {len(snapshot)}장 실시간 반영)"
+                    if err is None
+                    else f"{label} 폴백 반영 ({err})"
+                )
+                await ctx.update_subtask(
+                    key,
+                    status="COMPLETED",
+                    progress_pct=100,
+                    collected_count=len(snapshot),
+                    log_message=msg,
+                )
+
+            try:
+                final_slides = await self.synthesizer.synthesize_deck(
+                    project=project,
+                    sources=relevant_sources,
+                    facts=facts,
+                    datalab_series=datalab_series,
+                    sns_posts=sns_posts,
+                    media_assets=media_assets,
+                    split_mode=split_mode,
+                    on_blueprint_ready=_on_blueprint,
+                    on_batch_start=_on_batch_start,
+                    on_batch_complete=_on_batch_complete,
+                )
+                await _save_snapshot(final_slides)
+            except Exception as exc:
+                logger.warning("Claude async deck synthesis failed, saving deterministic deck: %s", exc)
+                fallback = build_deterministic_deck(
+                    project=project,
+                    sources=relevant_sources,
+                    facts=facts,
+                    datalab_series=datalab_series,
+                    sns_posts=sns_posts,
+                    media_assets=media_assets,
+                    split_mode=split_mode,
+                )
+                for sl in fallback:
+                    if not sl.id:
+                        sl.id = str(uuid.uuid4())
+                await _save_snapshot(fallback)
+                await ctx.update_subtask("init_blueprint", status="COMPLETED", progress_pct=100, collected_count=len(fallback))
+                for k, lbl in SYNTHESIS_BATCH_SPECS:
+                    await ctx.update_subtask(k, status="COMPLETED", progress_pct=100, collected_count=len(fallback), log_message=f"{lbl} 기본 덱 반영")
+        else:
+            fallback = build_deterministic_deck(
+                project=project,
+                sources=relevant_sources,
+                facts=facts,
+                datalab_series=datalab_series,
+                sns_posts=sns_posts,
+                media_assets=media_assets,
+                split_mode=split_mode,
+            )
+            for sl in fallback:
+                if not sl.id:
+                    sl.id = str(uuid.uuid4())
+            await _save_snapshot(fallback)
+            await ctx.update_subtask(
+                "init_blueprint",
+                status="COMPLETED",
+                progress_pct=100,
+                collected_count=len(fallback),
+                log_message=f"표지·목차 포함 {len(fallback)}장 골격 생성 완료",
+            )
+            for k, lbl in SYNTHESIS_BATCH_SPECS:
+                await ctx.update_subtask(
+                    k,
+                    status="COMPLETED",
+                    progress_pct=100,
+                    collected_count=len(fallback),
+                    log_message=f"{lbl} 완료",
+                )
+
+        async with db_write_lock:
+            async with ctx.session_factory() as s:
+                proj = await s.get(Project, project_id)
+                if proj:
+                    proj.current_stage = ProjectStage.REVIEW.value
+                    await s.commit()
+        await ctx.append_log("전체 장표 생성 및 검증 저장이 완료되었습니다.")
 
     async def refine_comment_for_slide(
         self,

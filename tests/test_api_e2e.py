@@ -257,7 +257,7 @@ async def test_full_api_e2e_workflow_and_fault_isolation(
     )
     assert exp_res.status_code == 201
     export_id = exp_res.json()["id"]
-    assert exp_res.json()["slide_count"] == len(split4_res.json()) + 1
+    assert exp_res.json()["slide_count"] == len(split4_res.json())
 
     dl_file = await async_client.get(
         f"/api/v1/projects/{project_id}/exports/{export_id}/download"

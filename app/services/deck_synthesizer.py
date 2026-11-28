@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+import copy
 import json
 import logging
 from typing import Any
+import uuid
 
 from app.integrations.anthropic_client import AnthropicClient
 from app.models.collection import DataLabSeries, MediaAsset, RawSourceItem, SnsTopPost
@@ -20,6 +23,37 @@ from app.services.deck_blueprint import (
 )
 
 logger = logging.getLogger(__name__)
+
+SYNTHESIS_BATCH_SPECS: list[tuple[str, str]] = [
+    ("batch_overview_own", "개요·자사 프로필·가격 장표 AI 합성"),
+    ("batch_own_channels", "자사 채널·인스타·유튜브·언론 장표 AI 합성"),
+    ("batch_market", "시장 규모·수요·유통·플레이어 장표 AI 합성"),
+    ("batch_comp_core", "경쟁 매트릭스·1:1 심층 비교 장표 AI 합성"),
+    ("batch_comp_mkt", "경쟁 SNS·언론·6분류 히트맵 장표 AI 합성"),
+    ("batch_consumer_voc", "소비자 타깃·VOC·브랜드 인식 장표 AI 합성"),
+    ("batch_consumer_bench", "소셜 트렌드·크로스 벤치마크 장표 AI 합성"),
+    ("batch_summary_qc", "3C 종합 요약·AS-IS→TO-BE·공백 감사 장표 합성"),
+]
+
+
+def clone_slide_draft(slide: SlideDraft) -> SlideDraft:
+    """Create a detached SlideDraft copy preserving id so incremental DB snapshots keep selection stable."""
+    return SlideDraft(
+        id=slide.id,
+        project_id=slide.project_id,
+        section_code=slide.section_code,
+        slide_order=slide.slide_order,
+        slide_type=slide.slide_type,
+        title=slide.title,
+        headcopy=slide.headcopy,
+        kpi_cards_json=copy.deepcopy(slide.kpi_cards_json or []),
+        bullets_json=copy.deepcopy(slide.bullets_json or []),
+        table_json=copy.deepcopy(slide.table_json),
+        visual_assets_json=copy.deepcopy(slide.visual_assets_json or []),
+        as_is_to_be_json=copy.deepcopy(slide.as_is_to_be_json),
+        footnote=slide.footnote,
+        review_status=slide.review_status,
+    )
 
 
 def _sanitize_bullets(raw_list: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -190,6 +224,9 @@ class DeckSynthesizer:
         sns_posts: list[SnsTopPost],
         media_assets: list[MediaAsset],
         split_mode: SummarySplitMode,
+        on_blueprint_ready: Callable[[list[SlideDraft]], Awaitable[None]] | None = None,
+        on_batch_start: Callable[[str, str], Awaitable[None]] | None = None,
+        on_batch_complete: Callable[[str, str, list[SlideDraft], Exception | None], Awaitable[None]] | None = None,
     ) -> list[SlideDraft]:
         deck = build_deterministic_deck(
             project=project,
@@ -200,6 +237,14 @@ class DeckSynthesizer:
             media_assets=media_assets,
             split_mode=split_mode,
         )
+        for slide in deck:
+            if not slide.id:
+                slide.id = str(uuid.uuid4())
+
+        recompute_index_slide(deck)
+        attach_verified_source_urls(deck, sources, sns_posts)
+        if on_blueprint_ready is not None:
+            await on_blueprint_ready([sanitize_slide_draft(clone_slide_draft(s)) for s in deck])
 
         ctx = self._build_evidence_context(
             project=project,
@@ -209,30 +254,40 @@ class DeckSynthesizer:
             sns_posts=sns_posts,
         )
 
-        batches = await asyncio.gather(
-            self._run_batch_overview_own_core(project, ctx),
-            self._run_batch_own_channels_press(project, ctx),
-            self._run_batch_market(project, ctx),
-            self._run_batch_comp_matrix_detail(project, ctx),
-            self._run_batch_comp_sns_press_mkt(project, ctx),
-            self._run_batch_consumer_voc(project, ctx),
-            self._run_batch_consumer_trends_bench(project, ctx),
-            self._run_batch_summary_conclusion(project, ctx, split_mode),
-            return_exceptions=True,
-        )
+        merge_lock = asyncio.Lock()
+        runners = [
+            ("batch_overview_own", "개요·자사 프로필·가격", self._run_batch_overview_own_core(project, ctx)),
+            ("batch_own_channels", "자사 채널·인스타·유튜브·언론", self._run_batch_own_channels_press(project, ctx)),
+            ("batch_market", "시장 규모·수요·유통·플레이어", self._run_batch_market(project, ctx)),
+            ("batch_comp_core", "경쟁 매트릭스·1:1 심층", self._run_batch_comp_matrix_detail(project, ctx)),
+            ("batch_comp_mkt", "경쟁 SNS·언론·마케팅 6분류", self._run_batch_comp_sns_press_mkt(project, ctx)),
+            ("batch_consumer_voc", "소비자 타깃·VOC·브랜드 인식", self._run_batch_consumer_voc(project, ctx)),
+            ("batch_consumer_bench", "소셜 트렌드·벤치마크", self._run_batch_consumer_trends_bench(project, ctx)),
+            ("batch_summary_qc", "3C 요약·AS-IS→TO-BE·공백 감사", self._run_batch_summary_conclusion(project, ctx, split_mode)),
+        ]
 
-        merged: dict[str, Any] = {}
-        for idx, res in enumerate(batches, start=1):
-            if isinstance(res, Exception):
-                logger.warning("Claude synthesis batch %d failed (fallback preserved): %s", idx, res)
-            elif isinstance(res, dict):
-                merged.update(res)
+        async def _execute_batch(key: str, label: str, coro: Awaitable[dict[str, Any]]) -> None:
+            if on_batch_start is not None:
+                await on_batch_start(key, label)
+            err: Exception | None = None
+            res: dict[str, Any] | None = None
+            try:
+                res = await coro
+            except Exception as exc:
+                err = exc
+                logger.warning("Claude synthesis batch %s failed (fallback preserved): %s", key, exc)
 
-        if merged:
-            self._apply_synthesis(deck, merged, split_mode, project)
+            async with merge_lock:
+                if isinstance(res, dict) and res:
+                    self._apply_synthesis(deck, res, split_mode, project)
+                    recompute_index_slide(deck)
+                    attach_verified_source_urls(deck, sources, sns_posts)
+                snapshot = [sanitize_slide_draft(clone_slide_draft(s)) for s in deck]
 
-        recompute_index_slide(deck)
-        attach_verified_source_urls(deck, sources, sns_posts)
+            if on_batch_complete is not None:
+                await on_batch_complete(key, label, snapshot, err)
+
+        await asyncio.gather(*(_execute_batch(k, lbl, coro) for k, lbl, coro in runners))
         return [sanitize_slide_draft(s) for s in deck]
 
     @staticmethod

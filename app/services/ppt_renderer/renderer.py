@@ -42,12 +42,15 @@ class PPTXRenderer:
         )
 
         builder = SlideBuilder(work_dir=output_path.parent / "charts")
-        builder.add_cover_slide(prs, project, total_body_slides=len(ordered))
+        has_cover = any(s.slide_type == "COVER" for s in ordered)
+        if not has_cover:
+            builder.add_cover_slide(prs, project, total_body_slides=len(ordered))
 
         for idx, draft in enumerate(ordered, start=1):
             builder.build_content_slide(
                 prs,
                 draft,
+                project=project,
                 datalab_series=datalab_series,
                 slide_number=idx,
                 total_slides=len(ordered),
