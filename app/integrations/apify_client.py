@@ -6,6 +6,9 @@ from app.core.config import get_settings
 from app.core.exceptions import ExternalApiError
 from app.integrations.base_client import BaseApiClient
 
+APIFY_POLL_TIMEOUT_SECONDS = 240.0
+APIFY_POLL_INTERVAL_SECONDS = 3.0
+
 
 COMMUNITY_DOMAIN_MAP: dict[str, str] = {
     "dcinside": "site:gall.dcinside.com",
@@ -75,10 +78,10 @@ class ApifyClient(BaseApiClient):
         if not run_id:
             return []
 
-        deadline = time.monotonic() + 110.0
+        deadline = time.monotonic() + APIFY_POLL_TIMEOUT_SECONDS
         status = str(run_data.get("status") or "RUNNING")
         while status in {"READY", "RUNNING"} and time.monotonic() < deadline:
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(APIFY_POLL_INTERVAL_SECONDS)
             poll = await self.request_json(
                 "GET",
                 f"/actor-runs/{run_id}",
@@ -89,7 +92,7 @@ class ApifyClient(BaseApiClient):
             status = str(pdata.get("status") or "")
             dataset_id = str(pdata.get("defaultDatasetId") or dataset_id)
 
-        if status != "SUCCEEDED" or not dataset_id:
+        if not dataset_id or status not in {"SUCCEEDED", "READY", "RUNNING"}:
             raise ExternalApiError(
                 provider=self.provider_name,
                 code="APIFY_RUN_FAILED",
@@ -104,6 +107,18 @@ class ApifyClient(BaseApiClient):
             force_refresh=True,
         )
         items = [i for i in (ds_res.get("items") or []) if isinstance(i, dict)]
+
+        if status != "SUCCEEDED":
+            # 타임아웃 시 부분 수집된 데이터셋이 있으면 캐시는 생략하고 결과만 복구 반환
+            if items:
+                return items
+            raise ExternalApiError(
+                provider=self.provider_name,
+                code="APIFY_RUN_FAILED",
+                message=f"Apify 액터({actor_id}) 실행이 완료되지 않았습니다 (status={status}).",
+                retryable=True,
+            )
+
         self.cache.set(self.provider_name, f"actor/{actor_id}", cache_params, {"items": items})
         return items
 
