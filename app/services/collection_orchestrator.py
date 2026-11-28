@@ -1008,18 +1008,28 @@ class CollectionOrchestrator:
                 }
 
                 for post in posts:
-                    thumb_url = url_by_post_url.get(post.post_url)
-                    if not thumb_url and post.platform == "YOUTUBE" and post.post_url:
-                        vid_match = re.search(r"(?:v=|/shorts/)([A-Za-z0-9_-]{6,})", post.post_url)
+                    candidate_urls: list[str] = []
+                    raw_url = url_by_post_url.get(post.post_url)
+                    if raw_url:
+                        candidate_urls.append(str(raw_url))
+                    if post.platform == "YOUTUBE" and post.post_url:
+                        vid_match = re.search(r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{6,})", post.post_url)
                         if vid_match:
-                            thumb_url = f"https://i.ytimg.com/vi/{vid_match.group(1)}/hqdefault.jpg"
+                            vid = vid_match.group(1)
+                            for q in ("hqdefault.jpg", "mqdefault.jpg"):
+                                yt_url = f"https://i.ytimg.com/vi/{vid}/{q}"
+                                if yt_url not in candidate_urls:
+                                    candidate_urls.append(yt_url)
+
                     downloaded = None
-                    if thumb_url:
+                    for cand_url in candidate_urls:
                         downloaded = await downloader.download_image(
                             project_id=project_id,
-                            image_url=str(thumb_url),
+                            image_url=cand_url,
                             prefix=f"sns_{post.rank_order}",
                         )
+                        if downloaded is not None:
+                            break
                     if downloaded is None:
                         downloaded = downloader.create_placeholder_card(
                             project_id=project_id,

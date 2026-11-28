@@ -128,7 +128,13 @@ class SourceItemRepository:
         if use_approved_only:
             approved_stmt = stmt.where(RawSourceItem.review_status == "APPROVED")
             approved = list((await self.session.execute(approved_stmt)).scalars().all())
-            if approved:
+            # SNS 계정 프로필(is_account_profile=True)만 자동 승인된 경우, 미승인(PENDING) 본문 원문이 통째로 누락되지 않도록 보호
+            substantive_approved = [
+                s
+                for s in approved
+                if not (isinstance(s.metadata_json, dict) and s.metadata_json.get("is_account_profile"))
+            ]
+            if substantive_approved:
                 return approved
         non_rejected = stmt.where(RawSourceItem.review_status != "REJECTED")
         return list((await self.session.execute(non_rejected)).scalars().all())
