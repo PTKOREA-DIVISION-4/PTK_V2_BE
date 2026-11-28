@@ -11,6 +11,7 @@ venv/
 .env
 .env.*
 !.env.example
+deploy/.env.server
 
 # Runtime artifacts (.gitkeep 만 추적)
 storage/media/*

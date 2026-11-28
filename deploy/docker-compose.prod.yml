@@ -1,0 +1,51 @@
+name: ptk-v2
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?}
+      MYSQL_DATABASE: factbook
+      MYSQL_USER: factbook
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+09:00
+      - --max_allowed_packet=67108864
+      - --innodb-buffer-pool-size=256M
+      - --performance-schema=OFF
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  api:
+    image: ${API_IMAGE:?}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: mysql+aiomysql://factbook:${MYSQL_PASSWORD:?}@db:3306/factbook?charset=utf8mb4
+      DATABASE_SYNC_URL: mysql+pymysql://factbook:${MYSQL_PASSWORD:?}@db:3306/factbook?charset=utf8mb4
+      STORAGE_ROOT: /app/storage
+      APP_ENV: production
+      DEBUG: "false"
+      DB_AUTO_CREATE_TABLES: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - storage_data:/app/storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mysqldata:
+  storage_data:
