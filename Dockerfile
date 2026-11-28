@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Matplotlib/Pillow 차트 한글 렌더링용 Pretendard 정적 TTF 설치
 RUN curl -fsSL -o /tmp/pretendard.zip https://github.com/orioncactus/pretendard/releases/download/v1.3.9/Pretendard-1.3.9.zip \
-    && unzip -j /tmp/pretendard.zip "public/static/Pretendard-*.ttf" -d /usr/share/fonts/ \
+    && unzip -j /tmp/pretendard.zip "public/static/alternative/Pretendard-*.ttf" -d /usr/share/fonts/ \
     && rm -f /tmp/pretendard.zip \
     && fc-cache -fv
 
