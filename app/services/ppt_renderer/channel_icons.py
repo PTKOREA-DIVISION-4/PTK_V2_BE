@@ -68,14 +68,36 @@ def _load_font(size_px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+ASSET_ICON_DIR = Path(__file__).resolve().parent / "assets" / "channel_icons"
+
+
 def render_channel_icon(channel_key: str, output_dir: Path, size_px: int = 64) -> Path:
-    """Renders a crisp 2x-supersampled channel brand symbol PNG and caches it under output_dir."""
+    """Loads authentic service icon PNG if bundled, or renders a 2x-supersampled Pillow badge fallback."""
     norm = normalize_channel_key(channel_key)
     spec = CHANNEL_SPECS.get(norm, CHANNEL_SPECS["official"])
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"icon_{norm}_{size_px}.png"
     if out_path.exists():
         return out_path
+
+    bundled = ASSET_ICON_DIR / f"{norm}.png"
+    if bundled.exists():
+        try:
+            with Image.open(bundled) as raw_im:
+                icon = raw_im.convert("RGBA").resize((size_px, size_px), Image.Resampling.LANCZOS)
+                mask = Image.new("L", (size_px, size_px), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.rounded_rectangle(
+                    [(0, 0), (size_px - 1, size_px - 1)],
+                    radius=max(4, int(size_px * 0.2)),
+                    fill=255,
+                )
+                rounded = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
+                rounded.paste(icon, (0, 0), mask)
+                rounded.save(out_path, format="PNG")
+                return out_path
+        except Exception:
+            pass
 
     hi = size_px * 2
     img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
