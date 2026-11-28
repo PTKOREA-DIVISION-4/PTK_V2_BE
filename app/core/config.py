@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
     )
+    CORS_ORIGIN_REGEX: str = ""
 
     # MySQL 8.0 (utf8mb4)
     DATABASE_URL: str = (
